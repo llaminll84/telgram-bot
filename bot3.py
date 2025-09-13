@@ -23,6 +23,9 @@ if not TELEGRAM_TOKEN or not CHAT_ID:
 
 bot = Bot(token=TELEGRAM_TOKEN)
 
+# ─── تست ارسال پیام ───
+bot.send_message(chat_id=CHAT_ID, text="✅ ربات با موفقیت راه‌اندازی شد!")
+
 # ─── صرافی کوکوین ───
 exchange = ccxt.kucoin()
 
