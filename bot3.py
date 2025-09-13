@@ -13,6 +13,14 @@ CHAT_ID = os.getenv("CHAT_ID")
 if not TELEGRAM_TOKEN or not CHAT_ID:
     raise ValueError("❌ BOT_TOKEN یا CHAT_ID در محیط اجرا پیدا نشد.")
 
+# بررسی مقدار متغیرها
+print("TOKEN ENV:", TELEGRAM_TOKEN)
+print("CHAT_ID ENV:", CHAT_ID)
+
+if not TELEGRAM_TOKEN or not CHAT_ID:
+    raise ValueError("❌ BOT_TOKEN یا CHAT_ID پیدا نشد.")
+
+
 bot = Bot(token=TELEGRAM_TOKEN)
 
 # ─── صرافی کوکوین ───
