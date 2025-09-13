@@ -8,6 +8,11 @@ from telegram import Bot
 # ─── اطلاعات ربات تلگرام ───
 TELEGRAM_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+
+# بررسی توکن و چت‌آی‌دی
+if not TELEGRAM_TOKEN or not CHAT_ID:
+    raise ValueError("❌ BOT_TOKEN یا CHAT_ID در محیط اجرا پیدا نشد.")
+
 bot = Bot(token=TELEGRAM_TOKEN)
 
 # ─── صرافی کوکوین ───
@@ -133,6 +138,8 @@ def main():
                 tf_signals = []
                 for tf in TIMEFRAMES:
                     df = get_ohlcv_df(symbol, tf)
+                    if df.empty or len(df) < 60:
+                        continue
                     df = calculate_indicators(df)
                     signal = check_signal(df, symbol, symbol_data['change'])
                     print(f"[CMD] {symbol} | TF: {tf} | Close: {df['close'].iloc[-1]:.4f} | Change: {symbol_data['change']:.2f}% | Patterns: {signal['patterns'] if signal else 'None'} | Order Blocks: {signal['order_blocks'] if signal else 'None'}")
@@ -149,17 +156,19 @@ def main():
                     tp = np.mean([s['tp'] for s in sigs])
                     stop = np.mean([s['stop'] for s in sigs])
                     msg += f"{symbol} → {sigs[0]['type']} | Entry: {entry:.4f} | TP: {tp:.4f} | Stop: {stop:.4f}\n"
+
+                # ارسال پیام به تلگرام (نسخه synchronous)
                 try:
                     bot.send_message(chat_id=CHAT_ID, text=msg)
                 except Exception as e:
-                    print(f"[Telegram Error] {e}")
+                    print(f"[Telegram Error] {type(e).__name__}: {e}")
+
             print("⏳ صبر برای ۵ دقیقه بعدی ...\n")
             time.sleep(300)
         except Exception as e:
-            print(f"⚠️ خطا: {e}")
+            print(f"⚠️ خطا: {type(e).__name__}: {e}")
             time.sleep(30)
 
 
 if __name__ == "__main__":
     main()
-
