@@ -1,7 +1,5 @@
 import time
 import os
-print("TOKEN ENV:", repr(os.getenv("BOT_TOKEN")))
-print("CHAT_ID ENV:", repr(os.getenv("CHAT_ID")))
 import ccxt
 import pandas as pd
 import numpy as np
