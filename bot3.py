@@ -5,9 +5,13 @@ import numpy as np
 from telegram import Bot
 
 # ─── اطلاعات ربات تلگرام ───
-TELEGRAM_TOKEN = "8420099120:AAH-T0HDTExmpl2vV-Ze7JjTyOuyoCn5muU"
-CHAT_ID = "905715397"
+import os
+from telegram import Bot
+
+TELEGRAM_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
 bot = Bot(token=TELEGRAM_TOKEN)
+
 
 # صرافی کوکوین
 exchange = ccxt.kucoin()
