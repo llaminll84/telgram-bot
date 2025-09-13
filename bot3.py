@@ -6,20 +6,20 @@ import numpy as np
 from telegram import Bot
 
 # ─── اطلاعات ربات تلگرام ───
+# ⚠️ برای تست مستقیم، می‌توانی توکن و چت‌آی‌دی را مستقیم وارد کنی:
+# TELEGRAM_TOKEN = "توکن_اینجا"
+# CHAT_ID = "چت_آی‌دی_اینجا"
+
 TELEGRAM_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-# بررسی توکن و چت‌آی‌دی
-if not TELEGRAM_TOKEN or not CHAT_ID:
-    raise ValueError("❌ BOT_TOKEN یا CHAT_ID در محیط اجرا پیدا نشد.")
-
-# بررسی مقدار متغیرها
+# نمایش مقدار برای بررسی
 print("TOKEN ENV:", TELEGRAM_TOKEN)
 print("CHAT_ID ENV:", CHAT_ID)
 
+# بررسی صحت مقادیر
 if not TELEGRAM_TOKEN or not CHAT_ID:
     raise ValueError("❌ BOT_TOKEN یا CHAT_ID پیدا نشد.")
-
 
 bot = Bot(token=TELEGRAM_TOKEN)
 
@@ -165,7 +165,7 @@ def main():
                     stop = np.mean([s['stop'] for s in sigs])
                     msg += f"{symbol} → {sigs[0]['type']} | Entry: {entry:.4f} | TP: {tp:.4f} | Stop: {stop:.4f}\n"
 
-                # ارسال پیام به تلگرام (نسخه synchronous)
+                # ارسال پیام به تلگرام (بدون async)
                 try:
                     bot.send_message(chat_id=CHAT_ID, text=msg)
                 except Exception as e:
