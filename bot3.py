@@ -4,26 +4,17 @@ import ccxt
 import pandas as pd
 import numpy as np
 from telegram import Bot
+from keep_alive import keep_alive  # اضافه کردن keep_alive
+
+# ─── فعال کردن سرور کوچک برای جلوگیری از خوابیدن کانتینر
+keep_alive()
 
 # ─── اطلاعات ربات تلگرام ───
-# ⚠️ برای تست مستقیم، می‌توانی توکن و چت‌آی‌دی را مستقیم وارد کنی:
-# TELEGRAM_TOKEN = "توکن_اینجا"
-# CHAT_ID = "چت_آی‌دی_اینجا"
-
 TELEGRAM_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-
-# نمایش مقدار برای بررسی
-print("TOKEN ENV:", TELEGRAM_TOKEN)
-print("CHAT_ID ENV:", CHAT_ID)
-
-# بررسی صحت مقادیر
-if not TELEGRAM_TOKEN or not CHAT_ID:
-    raise ValueError("❌ BOT_TOKEN یا CHAT_ID پیدا نشد.")
-
 bot = Bot(token=TELEGRAM_TOKEN)
 
-# ─── تست ارسال پیام ───
+# ─── پیام تست برای اطمینان از اتصال ───
 bot.send_message(chat_id=CHAT_ID, text="✅ ربات با موفقیت راه‌اندازی شد!")
 
 # ─── صرافی کوکوین ───
@@ -149,8 +140,6 @@ def main():
                 tf_signals = []
                 for tf in TIMEFRAMES:
                     df = get_ohlcv_df(symbol, tf)
-                    if df.empty or len(df) < 60:
-                        continue
                     df = calculate_indicators(df)
                     signal = check_signal(df, symbol, symbol_data['change'])
                     print(f"[CMD] {symbol} | TF: {tf} | Close: {df['close'].iloc[-1]:.4f} | Change: {symbol_data['change']:.2f}% | Patterns: {signal['patterns'] if signal else 'None'} | Order Blocks: {signal['order_blocks'] if signal else 'None'}")
@@ -167,19 +156,18 @@ def main():
                     tp = np.mean([s['tp'] for s in sigs])
                     stop = np.mean([s['stop'] for s in sigs])
                     msg += f"{symbol} → {sigs[0]['type']} | Entry: {entry:.4f} | TP: {tp:.4f} | Stop: {stop:.4f}\n"
-
-                # ارسال پیام به تلگرام (بدون async)
                 try:
                     bot.send_message(chat_id=CHAT_ID, text=msg)
                 except Exception as e:
-                    print(f"[Telegram Error] {type(e).__name__}: {e}")
-
+                    print(f"[Telegram Error] {e}")
             print("⏳ صبر برای ۵ دقیقه بعدی ...\n")
             time.sleep(300)
         except Exception as e:
-            print(f"⚠️ خطا: {type(e).__name__}: {e}")
+            print(f"⚠️ خطا: {e}")
             time.sleep(30)
 
 
 if __name__ == "__main__":
     main()
+
+
