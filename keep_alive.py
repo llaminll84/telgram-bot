@@ -1,3 +1,5 @@
+# keep_alive.py
+import os
 from flask import Flask
 from threading import Thread
 
@@ -8,7 +10,9 @@ def home():
     return "✅ ربات فعال است!"
 
 def run():
-    app.run(host='0.0.0.0', port=8000)
+    # پورت را از محیط دریافت کن، اگر نبود 8080 پیش‌فرض
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host='0.0.0.0', port=port)
 
 def keep_alive():
     t = Thread(target=run)
