@@ -146,7 +146,7 @@ def main():
                     if signal:
                         signal_count += 1
                         tf_signals.append(signal)
-                if signal_count >= 1:
+                if signal_count >= 2:
                     alerts.append((symbol, tf_signals))
 
             if alerts:
