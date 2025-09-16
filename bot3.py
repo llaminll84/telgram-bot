@@ -4,23 +4,23 @@ import ccxt
 import pandas as pd
 import numpy as np
 from telegram import Bot
-from keep_alive import keep_alive  # اضافه کردن keep_alive
+from keep_alive import keep_alive  # فعال کردن سرور کوچک
 
-# ─── فعال کردن سرور کوچک برای جلوگیری از خوابیدن کانتینر
+# ─── سرور کوچک برای جلوگیری از خوابیدن کانتینر
 keep_alive()
 
-# ─── اطلاعات ربات تلگرام ───
+# ─── اطلاعات ربات تلگرام
 TELEGRAM_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 bot = Bot(token=TELEGRAM_TOKEN)
 
-# ─── پیام تست برای اطمینان از اتصال ───
+# ─── پیام تست برای اطمینان از اتصال
 bot.send_message(chat_id=CHAT_ID, text="✅ ربات با موفقیت راه‌اندازی شد!")
 
-# ─── صرافی کوکوین ───
+# ─── صرافی کوکوین
 exchange = ccxt.kucoin()
 
-TOP_N = 50
+TOP_N = 60  # تعداد کوین‌ها
 TIMEFRAMES = ['5m', '15m', '1h']
 
 
@@ -47,14 +47,14 @@ def get_ohlcv_df(symbol, timeframe):
 def calculate_indicators(df):
     df['EMA9'] = df['close'].ewm(span=9, adjust=False).mean()
     df['EMA21'] = df['close'].ewm(span=21, adjust=False).mean()
-    df['EMA12'] = df['close'].ewm(span=12, adjust=False).mean()
-    df['EMA26'] = df['close'].ewm(span=26, adjust=False).mean()
-    df['MACD'] = df['EMA12'] - df['EMA26']
+    df['MACD'] = df['close'].ewm(span=12, adjust=False).mean() - df['close'].ewm(span=26, adjust=False).mean()
     df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
-    df['BB_Mid'] = df['close'].rolling(window=20).mean()
-    df['BB_Std'] = df['close'].rolling(window=20).std()
+    df['BB_Mid'] = df['close'].rolling(20).mean()
+    df['BB_Std'] = df['close'].rolling(20).std()
     df['BB_Upper'] = df['BB_Mid'] + 2 * df['BB_Std']
     df['BB_Lower'] = df['BB_Mid'] - 2 * df['BB_Std']
+    df['ATR'] = df['high'].combine(df['low'], max) - df['low'].combine(df['close'].shift(), min)
+    df['StochRSI'] = (df['close'] - df['close'].rolling(14).min()) / (df['close'].rolling(14).max() - df['close'].rolling(14).min())
     df['Tenkan'] = (df['high'].rolling(9).max() + df['low'].rolling(9).min()) / 2
     df['Kijun'] = (df['high'].rolling(26).max() + df['low'].rolling(26).min()) / 2
     df['SenkouA'] = ((df['Tenkan'] + df['Kijun']) / 2).shift(26)
@@ -92,25 +92,26 @@ def detect_order_block(df):
 
 def check_signal(df, symbol, change):
     price = df['close'].iloc[-1]
+    trend = 'neutral'
     if price > df['SenkouA'].iloc[-1] and price > df['SenkouB'].iloc[-1]:
         trend = 'bullish'
     elif price < df['SenkouA'].iloc[-1] and price < df['SenkouB'].iloc[-1]:
         trend = 'bearish'
-    else:
-        trend = 'neutral'
 
     patterns = detect_candlestick_patterns(df)
     order_blocks = detect_order_block(df)
     volume_check = df['volume'].iloc[-1] > df['volume'].rolling(20).mean().iloc[-1] * 1.5
+    stoch_rsi_check = df['StochRSI'].iloc[-1] > 0.8 if trend == 'bearish' else df['StochRSI'].iloc[-1] < 0.2
+    atr_check = df['ATR'].iloc[-1] > df['ATR'].rolling(14).mean().iloc[-1]
 
     if change >= 1 and trend == 'bullish' and any(
-            p in patterns for p in ['Bullish Engulfing', 'Hammer', 'Morning Star']) and volume_check:
+            p in patterns for p in ['Bullish Engulfing', 'Hammer', 'Morning Star']) and volume_check and stoch_rsi_check and atr_check:
         entry = price
         tp = price * 1.01
         stop = price * 0.995
         signal_type = 'LONG'
     elif change <= -1 and trend == 'bearish' and any(
-            p in patterns for p in ['Bearish Engulfing', 'Hanging Man', 'Evening Star']) and volume_check:
+            p in patterns for p in ['Bearish Engulfing', 'Hanging Man', 'Evening Star']) and volume_check and stoch_rsi_check and atr_check:
         entry = price
         tp = price * 0.99
         stop = price * 1.005
@@ -146,16 +147,14 @@ def main():
                     if signal:
                         signal_count += 1
                         tf_signals.append(signal)
-                if signal_count >= 2:
+                if signal_count >= 2:  # تایید دو تایم‌فریم
                     alerts.append((symbol, tf_signals))
 
             if alerts:
                 msg = "🚨 Multi-Coin Alert 🚨\n"
                 for symbol, sigs in alerts:
-                    entry = np.mean([s['entry'] for s in sigs])
-                    tp = np.mean([s['tp'] for s in sigs])
-                    stop = np.mean([s['stop'] for s in sigs])
-                    msg += f"{symbol} → {sigs[0]['type']} | Entry: {entry:.4f} | TP: {tp:.4f} | Stop: {stop:.4f}\n"
+                    for s in sigs:
+                        msg += f"{symbol}\nType: {s['type']}\nEntry: {s['entry']:.4f}\nTP: {s['tp']:.4f}\nStop: {s['stop']:.4f}\nPatterns: {s['patterns']}\nOrder Blocks: {s['order_blocks']}\n\n"
                 try:
                     bot.send_message(chat_id=CHAT_ID, text=msg)
                 except Exception as e:
@@ -169,5 +168,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
