@@ -54,7 +54,8 @@ def calculate_indicators(df):
     df['BB_Upper'] = df['BB_Mid'] + 2 * df['BB_Std']
     df['BB_Lower'] = df['BB_Mid'] - 2 * df['BB_Std']
     df['ATR'] = df['high'].combine(df['low'], max) - df['low'].combine(df['close'].shift(), min)
-    df['StochRSI'] = (df['close'] - df['close'].rolling(14).min()) / (df['close'].rolling(14).max() - df['close'].rolling(14).min())
+    df['StochRSI'] = (df['close'] - df['close'].rolling(14).min()) / (
+            df['close'].rolling(14).max() - df['close'].rolling(14).min())
     df['Tenkan'] = (df['high'].rolling(9).max() + df['low'].rolling(9).min()) / 2
     df['Kijun'] = (df['high'].rolling(26).max() + df['low'].rolling(26).min()) / 2
     df['SenkouA'] = ((df['Tenkan'] + df['Kijun']) / 2).shift(26)
@@ -101,17 +102,17 @@ def check_signal(df, symbol, change):
     patterns = detect_candlestick_patterns(df)
     order_blocks = detect_order_block(df)
     volume_check = df['volume'].iloc[-1] > df['volume'].rolling(20).mean().iloc[-1] * 1.5
- # stoch_rsi_check = df['StochRSI'].iloc[-1] > 0.8 if trend == 'bearish' else df['StochRSI'].iloc[-1] < 0.2
-  # atr_check = df['ATR'].iloc[-1] > df['ATR'].rolling(14).mean().iloc[-1]
+    stoch_rsi_check = df['StochRSI'].iloc[-1] > 0.8 if trend == 'bearish' else df['StochRSI'].iloc[-1] < 0.2
+    atr_check = df['ATR'].iloc[-1] > df['ATR'].rolling(14).mean().iloc[-1]
 
     if change >= 1 and trend == 'bullish' and any(
-            p in patterns for p in ['Bullish Engulfing', 'Hammer', 'Morning Star']) and volume_check and stoch_rsi_check and atr_check:
+            p in patterns for p in ['Bullish Engulfing', 'Hammer']) and volume_check and stoch_rsi_check and atr_check:
         entry = price
         tp = price * 1.01
         stop = price * 0.995
         signal_type = 'LONG'
     elif change <= -1 and trend == 'bearish' and any(
-            p in patterns for p in ['Bearish Engulfing', 'Hanging Man', 'Evening Star']) and volume_check and stoch_rsi_check and atr_check:
+            p in patterns for p in ['Bearish Engulfing', 'Hanging Man']) and volume_check and stoch_rsi_check and atr_check:
         entry = price
         tp = price * 0.99
         stop = price * 1.005
@@ -147,7 +148,7 @@ def main():
                     if signal:
                         signal_count += 1
                         tf_signals.append(signal)
-                if signal_count >= 1:  # تایید دو تایم‌فریم
+                if signal_count >= 1:  # اگر حداقل در یک تایم‌فریم سیگنال بود
                     alerts.append((symbol, tf_signals))
 
             if alerts:
