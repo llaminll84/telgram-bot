@@ -101,8 +101,8 @@ def check_signal(df, symbol, change):
     patterns = detect_candlestick_patterns(df)
     order_blocks = detect_order_block(df)
     volume_check = df['volume'].iloc[-1] > df['volume'].rolling(20).mean().iloc[-1] * 1.5
-    stoch_rsi_check = df['StochRSI'].iloc[-1] > 0.8 if trend == 'bearish' else df['StochRSI'].iloc[-1] < 0.2
-    atr_check = df['ATR'].iloc[-1] > df['ATR'].rolling(14).mean().iloc[-1]
+ # stoch_rsi_check = df['StochRSI'].iloc[-1] > 0.8 if trend == 'bearish' else df['StochRSI'].iloc[-1] < 0.2
+  # atr_check = df['ATR'].iloc[-1] > df['ATR'].rolling(14).mean().iloc[-1]
 
     if change >= 1 and trend == 'bullish' and any(
             p in patterns for p in ['Bullish Engulfing', 'Hammer', 'Morning Star']) and volume_check and stoch_rsi_check and atr_check:
