@@ -42,7 +42,7 @@ def get_ohlcv_df(symbol, timeframe):
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     return df
 
-# محاسبه اندیکاتورها (همه ابزارها فعال ولی نمایش داده نمی‌شوند)
+# محاسبه اندیکاتورها + فیبوناچی
 def calculate_indicators(df):
     # EMA
     df['EMA9'] = df['close'].ewm(span=9, adjust=False).mean()
@@ -82,6 +82,19 @@ def calculate_indicators(df):
     # حمایت/مقاومت ساده با Swing High/Low
     df['SwingHigh'] = df['high'][df['high'] == df['high'].rolling(5, center=True).max()]
     df['SwingLow'] = df['low'][df['low'] == df['low'].rolling(5, center=True).min()]
+
+    # --- سطوح فیبوناچی اصلاحی ---
+    if len(df) >= 50:
+        recent_high = df['high'].iloc[-50:].max()
+        recent_low = df['low'].iloc[-50:].min()
+        diff = recent_high - recent_low
+        df['Fib_0'] = recent_high
+        df['Fib_236'] = recent_high - 0.236 * diff
+        df['Fib_382'] = recent_high - 0.382 * diff
+        df['Fib_5'] = recent_high - 0.5 * diff
+        df['Fib_618'] = recent_high - 0.618 * diff
+        df['Fib_786'] = recent_high - 0.786 * diff
+        df['Fib_1'] = recent_low
     return df
 
 # الگوهای شمعی
@@ -146,7 +159,13 @@ def check_signal(df, symbol, change):
         else price < df['SenkouA'].iloc[-1] and price < df['SenkouB'].iloc[-1]
     )
 
-    if patterns and setups and atr_check and stoch_check and ichimoku_check:
+    fib_check = True
+    if 'Fib_618' in df.columns:
+        # اگر قیمت نزدیک یکی از سطوح مهم فیبوناچی بود
+        fib_levels = [df['Fib_236'].iloc[-1], df['Fib_382'].iloc[-1], df['Fib_5'].iloc[-1], df['Fib_618'].iloc[-1], df['Fib_786'].iloc[-1]]
+        fib_check = any(abs(price - lvl) / price < 0.003 for lvl in fib_levels)
+
+    if patterns and setups and atr_check and stoch_check and ichimoku_check and fib_check:
         signal_type = 'LONG' if trend == 'bullish' else 'SHORT'
         entry = price
         tp = price * 1.01 if signal_type == 'LONG' else price * 0.99
