@@ -42,7 +42,7 @@ def get_ohlcv_df(symbol, timeframe):
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     return df
 
-# محاسبه اندیکاتورها + فیبوناچی
+# محاسبه اندیکاتورها (همه ابزارها فعال ولی نمایش داده نمی‌شوند)
 def calculate_indicators(df):
     # EMA
     df['EMA9'] = df['close'].ewm(span=9, adjust=False).mean()
@@ -75,6 +75,14 @@ def calculate_indicators(df):
     df['SenkouA'] = ((df['Tenkan'] + df['Kijun']) / 2).shift(26)
     df['SenkouB'] = ((df['high'].rolling(52).max() + df['low'].rolling(52).min()) / 2).shift(26)
 
+    # سطوح فیبوناچی (High/Low آخر 50 کندل)
+    recent = df.tail(50)
+    high_price = recent['high'].max()
+    low_price = recent['low'].min()
+    diff = high_price - low_price
+    for level, name in zip([0.236, 0.382, 0.5, 0.618, 0.786], ['Fib23', 'Fib38', 'Fib50', 'Fib61', 'Fib78']):
+        df[name] = high_price - diff * level
+
     # Order Blocks ساده (۵ کندل اخیر)
     df['OB_High'] = df['high'].rolling(5).max()
     df['OB_Low'] = df['low'].rolling(5).min()
@@ -82,21 +90,29 @@ def calculate_indicators(df):
     # حمایت/مقاومت ساده با Swing High/Low
     df['SwingHigh'] = df['high'][df['high'] == df['high'].rolling(5, center=True).max()]
     df['SwingLow'] = df['low'][df['low'] == df['low'].rolling(5, center=True).min()]
-
-    # --- سطوح فیبوناچی اصلاحی ---
-    if len(df) >= 50:
-        recent_high = df['high'].iloc[-50:].max()
-        recent_low = df['low'].iloc[-50:].min()
-        diff = recent_high - recent_low
-        df['Fib_0'] = recent_high
-        df['Fib_236'] = recent_high - 0.236 * diff
-        df['Fib_382'] = recent_high - 0.382 * diff
-        df['Fib_5'] = recent_high - 0.5 * diff
-        df['Fib_618'] = recent_high - 0.618 * diff
-        df['Fib_786'] = recent_high - 0.786 * diff
-        df['Fib_1'] = recent_low
     return df
 
+# واگرایی RSI
+def detect_rsi_divergence(df):
+    if len(df) < 10:
+        return None
+    rsi = df['RSI']
+    close = df['close']
+
+    last_rsi_highs = rsi.tail(5).nlargest(2)
+    last_price_highs = close.loc[last_rsi_highs.index]
+
+    last_rsi_lows = rsi.tail(5).nsmallest(2)
+    last_price_lows = close.loc[last_rsi_lows.index]
+
+    bullish = last_price_lows.iloc[-1] < last_price_lows.iloc[0] and last_rsi_lows.iloc[-1] > last_rsi_lows.iloc[0]
+    bearish = last_price_highs.iloc[-1] > last_price_highs.iloc[0] and last_rsi_highs.iloc[-1] < last_rsi_highs.iloc[0]
+
+    if bullish:
+        return 'bullish'
+    elif bearish:
+        return 'bearish'
+    return None
 # الگوهای شمعی
 def detect_candlestick_patterns(df):
     patterns = []
@@ -112,6 +128,29 @@ def detect_candlestick_patterns(df):
     if (high - close) > 2 * (high - open_):
         patterns.append('Hanging Man')
     return patterns
+
+# تشخیص الگوهای پرچم و مثلث (ووج)
+def detect_pattern_flags(df):
+    flag_patterns = []
+    if len(df) < 10:
+        return flag_patterns
+    recent = df.tail(10)
+    highs = recent['high']
+    lows = recent['low']
+    closes = recent['close']
+
+    # الگوی Flag Up ساده
+    if closes.iloc[-1] > closes.iloc[0] and highs.max() - lows.min() < 0.03 * closes.iloc[0]:
+        flag_patterns.append('Bullish Flag')
+
+    # الگوی Flag Down ساده
+    if closes.iloc[-1] < closes.iloc[0] and highs.max() - lows.min() < 0.03 * closes.iloc[0]:
+        flag_patterns.append('Bearish Flag')
+
+    # الگوی مثلث / ووج (مثلث صعودی یا نزولی)
+    if (highs.max() - highs.min()) < 0.03 * closes.iloc[0] and (lows.max() - lows.min()) < 0.03 * closes.iloc[0]:
+        flag_patterns.append('Triangle / Wedge')
+    return flag_patterns
 
 # ستاپ‌های ساده
 def detect_setups(df):
@@ -150,6 +189,8 @@ def check_signal(df, symbol, change):
 
     patterns = detect_candlestick_patterns(df)
     setups = detect_setups(df)
+    divergence = detect_rsi_divergence(df)
+    flag_patterns = detect_pattern_flags(df)
 
     atr_check = df['ATR'].iloc[-1] > df['ATR'].rolling(14).mean().iloc[-1]
     stoch_check = df['StochRSI'].iloc[-1] > 0.8 if trend == 'bearish' else df['StochRSI'].iloc[-1] < 0.2
@@ -159,23 +200,35 @@ def check_signal(df, symbol, change):
         else price < df['SenkouA'].iloc[-1] and price < df['SenkouB'].iloc[-1]
     )
 
-    fib_check = True
-    if 'Fib_618' in df.columns:
-        # اگر قیمت نزدیک یکی از سطوح مهم فیبوناچی بود
-        fib_levels = [df['Fib_236'].iloc[-1], df['Fib_382'].iloc[-1], df['Fib_5'].iloc[-1], df['Fib_618'].iloc[-1], df['Fib_786'].iloc[-1]]
-        fib_check = any(abs(price - lvl) / price < 0.003 for lvl in fib_levels)
-
-    if patterns and setups and atr_check and stoch_check and ichimoku_check and fib_check:
-        signal_type = 'LONG' if trend == 'bullish' else 'SHORT'
-        entry = price
-        tp = price * 1.01 if signal_type == 'LONG' else price * 0.99
-        stop = price * 0.995 if signal_type == 'LONG' else price * 1.005
-        return {
-            'entry': entry,
-            'tp': tp,
-            'stop': stop,
-            'type': signal_type
-        }
+    if patterns and setups and atr_check and stoch_check and ichimoku_check:
+        # فیلتر بر اساس واگرایی RSI
+        if (trend == 'bullish' and divergence != 'bearish') or (trend == 'bearish' and divergence != 'bullish'):
+            # بررسی الگوهای پرچم و مثلث
+            if flag_patterns:
+                signal_type = 'LONG' if trend == 'bullish' else 'SHORT'
+                entry = price
+                tp = price * 1.01 if signal_type == 'LONG' else price * 0.99
+                stop = price * 0.995 if signal_type == 'LONG' else price * 1.005
+                return {
+                    'entry': entry,
+                    'tp': tp,
+                    'stop': stop,
+                    'type': signal_type,
+                    'patterns': flag_patterns
+                }
+            else:
+                # اگر هیچ الگویی نبود، سیگنال بر اساس روند قبلی
+                signal_type = 'LONG' if trend == 'bullish' else 'SHORT'
+                entry = price
+                tp = price * 1.01 if signal_type == 'LONG' else price * 0.99
+                stop = price * 0.995 if signal_type == 'LONG' else price * 1.005
+                return {
+                    'entry': entry,
+                    'tp': tp,
+                    'stop': stop,
+                    'type': signal_type,
+                    'patterns': []
+                }
     return None
 
 # حلقه اصلی
@@ -206,7 +259,16 @@ def main():
             if alerts:
                 msg = "🚨 Multi-Coin Alert 🚨\n"
                 for symbol, s in alerts:
-                    msg += f"{symbol} → {s['type']} | Entry: {s['entry']:.4f} | TP: {s['tp']:.4f} | Stop: {s['stop']:.4f}\n"
+                    msg += (
+                        f"{symbol}\n"
+                        f"➡️ نوع سیگنال: {s['type']}\n"
+                        f"💰 ورود: {s['entry']:.4f}\n"
+                        f"🎯 تارگت: {s['tp']:.4f}\n"
+                        f"🛑 استاپ: {s['stop']:.4f}\n"
+                    )
+                    if s['patterns']:
+                        msg += f"🔹 الگوهای تشخیص داده شده: {', '.join(s['patterns'])}\n"
+                    msg += "\n"
                 try:
                     bot.send_message(chat_id=CHAT_ID, text=msg)
                 except Exception as e:
