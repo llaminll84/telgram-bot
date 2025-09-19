@@ -299,19 +299,4 @@ def main():
 
 
 if __name__ == "__main__":
-    
-      # ─── پیام تستی ستاره‌ها ───
-    test_passed = 3
-    test_total = 6
-    test_msg = (
-        f"🚨 Test Multi-Coin Alert 🚨\n"
-        f"SAMPLE/USDT → LONG\n"
-        f"Entry: 650.0\n"
-        f"TP: 660.0\n"
-        f"Stop: 645.0\n"
-        f"{'⭐'*test_passed} ({test_passed}/{test_total})"
-    )
-    print(test_msg)  # نمایش در لاگ
-    bot.send_message(chat_id=CHAT_ID, text=test_msg)
-
     main()
