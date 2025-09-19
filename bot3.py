@@ -13,6 +13,7 @@ keep_alive()
 TELEGRAM_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 bot = Bot(token=TELEGRAM_TOKEN)
+
 bot.send_message(chat_id=CHAT_ID, text="✅ ربات با موفقیت راه‌اندازی شد!")
 
 # ─── صرافی کوکوین ───
@@ -20,6 +21,8 @@ exchange = ccxt.kucoin()
 TOP_N = 85
 TIMEFRAMES = ['5m', '15m', '1h']
 
+
+# ─── دریافت لیست برتر از لحاظ حجم ───
 def get_top_symbols():
     tickers = exchange.fetch_tickers()
     symbols = []
@@ -33,11 +36,15 @@ def get_top_symbols():
     symbols.sort(key=lambda x: x['volume'], reverse=True)
     return symbols[:TOP_N]
 
+
+# ─── دریافت کندل‌های تاریخی ───
 def get_ohlcv_df(symbol, timeframe):
     ohlcv = exchange.fetch_ohlcv(symbol, timeframe)
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     return df.dropna()
 
+
+# ─── محاسبه اندیکاتورها ───
 def calculate_indicators(df):
     df['EMA9'] = df['close'].ewm(span=9, adjust=False).mean()
     df['EMA21'] = df['close'].ewm(span=21, adjust=False).mean()
@@ -79,6 +86,8 @@ def calculate_indicators(df):
     df['SwingLow'] = df['low'][df['low'] == df['low'].rolling(5, center=True).min()]
     return df
 
+
+# ─── تشخیص واگرایی RSI ───
 def detect_rsi_divergence(df):
     if len(df) < 10:
         return None
@@ -100,6 +109,8 @@ def detect_rsi_divergence(df):
         return 'bearish'
     return None
 
+
+# ─── تشخیص الگوهای کندلی ───
 def detect_candlestick_patterns(df):
     patterns = []
     open_, close, high, low = df['open'].iloc[-1], df['close'].iloc[-1], df['high'].iloc[-1], df['low'].iloc[-1]
@@ -114,7 +125,7 @@ def detect_candlestick_patterns(df):
     if (high - close) > 2 * (high - open_):
         patterns.append('Hanging Man')
     return patterns
-
+# ─── تشخیص الگوهای پرچم و مثلث ───
 def detect_pattern_flags(df):
     flag_patterns = []
     if len(df) < 10:
@@ -131,6 +142,9 @@ def detect_pattern_flags(df):
     if (highs.max() - highs.min()) < 0.03 * closes.iloc[0] and (lows.max() - lows.min()) < 0.03 * closes.iloc[0]:
         flag_patterns.append('Triangle / Wedge')
     return flag_patterns
+
+
+# ─── تشخیص ستاپ‌ها ───
 def detect_setups(df):
     setups = []
     if df['close'].iloc[-1] > df['close'][-21:-1].max() * 1.01:
@@ -151,12 +165,10 @@ def detect_setups(df):
     return setups
 
 
+# ─── بررسی و ساخت سیگنال ───
 def check_signal(df, symbol, change):
     if len(df) < 30:
         return None
-
-    total_conditions = 6
-    passed_conditions = 0
 
     price = df['close'].iloc[-1]
     trend = 'neutral'
@@ -164,13 +176,9 @@ def check_signal(df, symbol, change):
         trend = 'bullish'
     elif price < df['EMA21'].iloc[-1]:
         trend = 'bearish'
-    if trend in ['bullish', 'bearish']:
-        passed_conditions += 1
 
     # شرط حجم
-    if df['volume'].iloc[-1] > 1.5 * df['volume'].iloc[-21:-1].mean():
-        passed_conditions += 1
-    else:
+    if df['volume'].iloc[-1] <= 1.5 * df['volume'].iloc[-21:-1].mean():
         return None
 
     patterns = detect_candlestick_patterns(df)
@@ -178,65 +186,65 @@ def check_signal(df, symbol, change):
     divergence = detect_rsi_divergence(df)
     flag_patterns = detect_pattern_flags(df)
 
-    if patterns:
-        passed_conditions += 1
-    if setups:
-        passed_conditions += 1
-
     atr_now = df['ATR'].iloc[-1]
     atr_avg = df['ATR'].rolling(14).mean().iloc[-1]
     atr_check = atr_now > atr_avg
-    if atr_check:
-        passed_conditions += 1
 
+    # StochRSI
     if trend == 'bullish':
         stoch_check = df['StochRSI'].iloc[-1] < 0.2
     else:
         stoch_check = df['StochRSI'].iloc[-1] > 0.8
-    if stoch_check:
-        passed_conditions += 1
 
-    ichi_check = False
+    # ایچیموکو
     if trend == 'bullish':
         ichi_check = price > df['SenkouA'].iloc[-1] and price > df['SenkouB'].iloc[-1]
-    elif trend == 'bearish':
+    else:
         ichi_check = price < df['SenkouA'].iloc[-1] and price < df['SenkouB'].iloc[-1]
+
+    # شمارش شرط‌ها
+    total_conditions = 6
+    passed_conditions = 0
+    if patterns:
+        passed_conditions += 1
+    if setups:
+        passed_conditions += 1
+    if atr_check:
+        passed_conditions += 1
+    if stoch_check:
+        passed_conditions += 1
     if ichi_check:
         passed_conditions += 1
+    if (trend == 'bullish' and divergence != 'bearish') or \
+       (trend == 'bearish' and divergence != 'bullish'):
+        passed_conditions += 1
 
-    if passed_conditions < 3:
-        return None
+    if passed_conditions >= 4:  # حداقل تعداد شرط لازم
+        signal_type = 'LONG' if trend == 'bullish' else 'SHORT'
+        atr_mult_stop = 1.5
+        atr_mult_tp = 2.5
 
-    if (trend == 'bullish' and divergence == 'bearish') or (trend == 'bearish' and divergence == 'bullish'):
-        return None
+        if signal_type == 'LONG':
+            stop = price - atr_mult_stop * atr_now
+            tp = price + atr_mult_tp * atr_now
+        else:
+            stop = price + atr_mult_stop * atr_now
+            tp = price - atr_mult_tp * atr_now
 
-    signal_type = 'LONG' if trend == 'bullish' else 'SHORT'
+        rr = abs(tp - price) / abs(price - stop)
+        if rr < 1.5:
+            return None
 
-    atr_mult_stop = 1.5
-    atr_mult_tp = 2.5
-
-    if signal_type == 'LONG':
-        stop = price - atr_mult_stop * atr_now
-        tp = price + atr_mult_tp * atr_now
-    else:
-        stop = price + atr_mult_stop * atr_now
-        tp = price - atr_mult_tp * atr_now
-
-    rr = abs(tp - price) / abs(price - stop)
-    if rr < 1.5:
-        return None
-
-    stars = "⭐" * passed_conditions
-    return {
-        'entry': price,
-        'tp': tp,
-        'stop': stop,
-        'type': signal_type,
-        'patterns': flag_patterns,
-        'stars': stars,
-        'passed': passed_conditions,
-        'total': total_conditions
-    }
+        return {
+            'entry': price,
+            'tp': tp,
+            'stop': stop,
+            'type': signal_type,
+            'patterns': flag_patterns,
+            'passed': passed_conditions,
+            'total': total_conditions
+        }
+    return None
 
 
 # ─── حلقه اصلی ───
@@ -267,13 +275,13 @@ def main():
             if alerts:
                 msg = "🚨 Multi-Coin Alert 🚨\n"
                 for symbol, s in alerts:
+                    stars = "⭐" * s['passed']
                     msg += (
-                        f"{symbol}\n"
-                        f"➡️ نوع سیگنال: {s['type']}\n"
-                        f"💰 ورود: {s['entry']:.4f}\n"
-                        f"🎯 تارگت: {s['tp']:.4f}\n"
-                        f"🛑 استاپ: {s['stop']:.4f}\n"
-                        f"{s['stars']} ({s['passed']} از {s['total']} شرط)\n"
+                        f"{symbol} → {s['type']}\n"
+                        f"Entry: {s['entry']:.4f}\n"
+                        f"TP: {s['tp']:.4f}\n"
+                        f"Stop: {s['stop']:.4f}\n"
+                        f"{stars} ({s['passed']}/{s['total']})\n"
                     )
                     if s['patterns']:
                         msg += f"🔹 الگوها: {', '.join(s['patterns'])}\n"
