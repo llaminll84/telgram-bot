@@ -4,6 +4,7 @@ import ccxt
 import pandas as pd
 import numpy as np
 from telegram import Bot
+from threading import Thread
 from keep_alive import keep_alive
 
 # ─── فعال کردن سرور کوچک ───
@@ -14,6 +15,7 @@ TELEGRAM_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 bot = Bot(token=TELEGRAM_TOKEN)
 
+# پیام شروع ربات
 bot.send_message(chat_id=CHAT_ID, text="✅ ربات با موفقیت راه‌اندازی شد!")
 
 # ─── صرافی کوکوین ───
@@ -21,8 +23,9 @@ exchange = ccxt.kucoin()
 TOP_N = 85
 TIMEFRAMES = ['5m', '15m', '1h']
 
+# ─── تابع‌ها با کامنت برای توضیح ───
 
-# ─── دریافت لیست برتر از لحاظ حجم ───
+# دریافت نمادهای پرحجم
 def get_top_symbols():
     tickers = exchange.fetch_tickers()
     symbols = []
@@ -36,15 +39,13 @@ def get_top_symbols():
     symbols.sort(key=lambda x: x['volume'], reverse=True)
     return symbols[:TOP_N]
 
-
-# ─── دریافت کندل‌های تاریخی ───
+# گرفتن دیتای OHLCV
 def get_ohlcv_df(symbol, timeframe):
     ohlcv = exchange.fetch_ohlcv(symbol, timeframe)
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     return df.dropna()
 
-
-# ─── محاسبه اندیکاتورها ───
+# محاسبه اندیکاتورها
 def calculate_indicators(df):
     df['EMA9'] = df['close'].ewm(span=9, adjust=False).mean()
     df['EMA21'] = df['close'].ewm(span=21, adjust=False).mean()
@@ -86,8 +87,7 @@ def calculate_indicators(df):
     df['SwingLow'] = df['low'][df['low'] == df['low'].rolling(5, center=True).min()]
     return df
 
-
-# ─── تشخیص واگرایی RSI ───
+# شناسایی واگرایی RSI
 def detect_rsi_divergence(df):
     if len(df) < 10:
         return None
@@ -109,8 +109,7 @@ def detect_rsi_divergence(df):
         return 'bearish'
     return None
 
-
-# ─── تشخیص الگوهای کندلی ───
+# شناسایی الگوهای کندل
 def detect_candlestick_patterns(df):
     patterns = []
     open_, close, high, low = df['open'].iloc[-1], df['close'].iloc[-1], df['high'].iloc[-1], df['low'].iloc[-1]
@@ -125,7 +124,9 @@ def detect_candlestick_patterns(df):
     if (high - close) > 2 * (high - open_):
         patterns.append('Hanging Man')
     return patterns
-# ─── تشخیص الگوهای پرچم و مثلث ───
+
+# ادامه نیمه دوم کد در پیام بعدی…
+# شناسایی الگوهای پرچم و مثلث
 def detect_pattern_flags(df):
     flag_patterns = []
     if len(df) < 10:
@@ -143,8 +144,7 @@ def detect_pattern_flags(df):
         flag_patterns.append('Triangle / Wedge')
     return flag_patterns
 
-
-# ─── تشخیص ستاپ‌ها ───
+# شناسایی ستاپ‌ها
 def detect_setups(df):
     setups = []
     if df['close'].iloc[-1] > df['close'][-21:-1].max() * 1.01:
@@ -164,8 +164,7 @@ def detect_setups(df):
             setups.append('Double Bottom')
     return setups
 
-
-# ─── بررسی و ساخت سیگنال ───
+# بررسی سیگنال و محاسبه ستاره‌ها
 def check_signal(df, symbol, change):
     if len(df) < 30:
         return None
@@ -202,52 +201,43 @@ def check_signal(df, symbol, change):
     else:
         ichi_check = price < df['SenkouA'].iloc[-1] and price < df['SenkouB'].iloc[-1]
 
-    # شمارش شرط‌ها
-    total_conditions = 6
-    passed_conditions = 0
-    if patterns:
-        passed_conditions += 1
-    if setups:
-        passed_conditions += 1
-    if atr_check:
-        passed_conditions += 1
-    if stoch_check:
-        passed_conditions += 1
-    if ichi_check:
-        passed_conditions += 1
-    if (trend == 'bullish' and divergence != 'bearish') or \
-       (trend == 'bearish' and divergence != 'bullish'):
-        passed_conditions += 1
+    # شمارنده شرط‌ها
+    conditions = [patterns, setups, atr_check, stoch_check, ichi_check, True if divergence else True]
+    stars = sum([1 if c else 0 for c in conditions])
 
-    if passed_conditions >= 4:  # حداقل تعداد شرط لازم
-        signal_type = 'LONG' if trend == 'bullish' else 'SHORT'
-        atr_mult_stop = 1.5
-        atr_mult_tp = 2.5
+    if patterns and setups and atr_check and stoch_check and ichi_check:
+        if (trend == 'bullish' and divergence != 'bearish') or \
+           (trend == 'bearish' and divergence != 'bullish'):
 
-        if signal_type == 'LONG':
-            stop = price - atr_mult_stop * atr_now
-            tp = price + atr_mult_tp * atr_now
-        else:
-            stop = price + atr_mult_stop * atr_now
-            tp = price - atr_mult_tp * atr_now
+            signal_type = 'LONG' if trend == 'bullish' else 'SHORT'
 
-        rr = abs(tp - price) / abs(price - stop)
-        if rr < 1.5:
-            return None
+            # --- استاپ و تارگت بر اساس ATR ---
+            atr_mult_stop = 1.5
+            atr_mult_tp = 2.5
 
-        return {
-            'entry': price,
-            'tp': tp,
-            'stop': stop,
-            'type': signal_type,
-            'patterns': flag_patterns,
-            'passed': passed_conditions,
-            'total': total_conditions
-        }
+            if signal_type == 'LONG':
+                stop = price - atr_mult_stop * atr_now
+                tp = price + atr_mult_tp * atr_now
+            else:
+                stop = price + atr_mult_stop * atr_now
+                tp = price - atr_mult_tp * atr_now
+
+            rr = abs(tp - price) / abs(price - stop)
+            if rr < 1.5:
+                return None
+
+            return {
+                'entry': price,
+                'tp': tp,
+                'stop': stop,
+                'type': signal_type,
+                'patterns': flag_patterns,
+                'stars': stars,
+                'total_conditions': len(conditions)
+            }
     return None
 
-
-# ─── حلقه اصلی ───
+# ─── حلقه اصلی ربات ───
 def main():
     print("🚀 ربات Multi-Coin & Multi-Timeframe با آلارم خودکار شروع شد")
     while True:
@@ -275,13 +265,10 @@ def main():
             if alerts:
                 msg = "🚨 Multi-Coin Alert 🚨\n"
                 for symbol, s in alerts:
-                    stars = "⭐" * s['passed']
                     msg += (
-                        f"{symbol} → {s['type']}\n"
-                        f"Entry: {s['entry']:.4f}\n"
-                        f"TP: {s['tp']:.4f}\n"
-                        f"Stop: {s['stop']:.4f}\n"
-                        f"{stars} ({s['passed']}/{s['total']})\n"
+                        f"{symbol} → {s['type']} | Entry: {s['entry']:.4f} | "
+                        f"TP: {s['tp']:.4f} | Stop: {s['stop']:.4f}\n"
+                        f"{'⭐'*s['stars']} ({s['stars']}/{s['total_conditions']})\n"
                     )
                     if s['patterns']:
                         msg += f"🔹 الگوها: {', '.join(s['patterns'])}\n"
@@ -297,6 +284,5 @@ def main():
             print(f"⚠️ خطا: {e}")
             time.sleep(30)
 
-
-if __name__ == "__main__":
-    main()
+# ─── اجرای ربات در Thread جدا برای keep_alive ───
+Thread(target=main).start()
