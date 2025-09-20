@@ -1,4 +1,4 @@
-You said:
+
 import time
 import os
 import ccxt
