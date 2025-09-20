@@ -4,7 +4,6 @@ import ccxt
 import pandas as pd
 import numpy as np
 from telegram import Bot
-from threading import Thread
 from keep_alive import keep_alive
 
 # ─── فعال کردن سرور کوچک ───
@@ -14,16 +13,12 @@ keep_alive()
 TELEGRAM_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 bot = Bot(token=TELEGRAM_TOKEN)
-
-# پیام شروع ربات
 bot.send_message(chat_id=CHAT_ID, text="✅ ربات با موفقیت راه‌اندازی شد!")
 
 # ─── صرافی کوکوین ───
 exchange = ccxt.kucoin()
 TOP_N = 85
 TIMEFRAMES = ['5m', '15m', '1h']
-
-# ─── توابع ───
 
 def get_top_symbols():
     tickers = exchange.fetch_tickers()
@@ -136,7 +131,6 @@ def detect_pattern_flags(df):
     if (highs.max() - highs.min()) < 0.03 * closes.iloc[0] and (lows.max() - lows.min()) < 0.03 * closes.iloc[0]:
         flag_patterns.append('Triangle / Wedge')
     return flag_patterns
-
 def detect_setups(df):
     setups = []
     if df['close'].iloc[-1] > df['close'][-21:-1].max() * 1.01:
@@ -156,9 +150,13 @@ def detect_setups(df):
             setups.append('Double Bottom')
     return setups
 
+
 def check_signal(df, symbol, change):
     if len(df) < 30:
         return None
+
+    total_conditions = 6
+    passed_conditions = 0
 
     price = df['close'].iloc[-1]
     trend = 'neutral'
@@ -166,8 +164,13 @@ def check_signal(df, symbol, change):
         trend = 'bullish'
     elif price < df['EMA21'].iloc[-1]:
         trend = 'bearish'
+    if trend in ['bullish', 'bearish']:
+        passed_conditions += 1
 
-    if df['volume'].iloc[-1] <= 1.5 * df['volume'].iloc[-21:-1].mean():
+    # شرط حجم
+    if df['volume'].iloc[-1] > 1.5 * df['volume'].iloc[-21:-1].mean():
+        passed_conditions += 1
+    else:
         return None
 
     patterns = detect_candlestick_patterns(df)
@@ -175,42 +178,68 @@ def check_signal(df, symbol, change):
     divergence = detect_rsi_divergence(df)
     flag_patterns = detect_pattern_flags(df)
 
+    if patterns:
+        passed_conditions += 1
+    if setups:
+        passed_conditions += 1
+
     atr_now = df['ATR'].iloc[-1]
     atr_avg = df['ATR'].rolling(14).mean().iloc[-1]
     atr_check = atr_now > atr_avg
+    if atr_check:
+        passed_conditions += 1
 
-    stoch_check = (df['StochRSI'].iloc[-1] < 0.2) if trend == 'bullish' else (df['StochRSI'].iloc[-1] > 0.8)
-    ichi_check = (price > df['SenkouA'].iloc[-1] and price > df['SenkouB'].iloc[-1]) if trend == 'bullish' else (price < df['SenkouA'].iloc[-1] and price < df['SenkouB'].iloc[-1])
+    if trend == 'bullish':
+        stoch_check = df['StochRSI'].iloc[-1] < 0.2
+    else:
+        stoch_check = df['StochRSI'].iloc[-1] > 0.8
+    if stoch_check:
+        passed_conditions += 1
 
-    conditions = [patterns, setups, atr_check, stoch_check, ichi_check, True if divergence else True]
-    stars = sum([1 if c else 0 for c in conditions])
+    ichi_check = False
+    if trend == 'bullish':
+        ichi_check = price > df['SenkouA'].iloc[-1] and price > df['SenkouB'].iloc[-1]
+    elif trend == 'bearish':
+        ichi_check = price < df['SenkouA'].iloc[-1] and price < df['SenkouB'].iloc[-1]
+    if ichi_check:
+        passed_conditions += 1
 
-    if patterns and setups and atr_check and stoch_check and ichi_check:
-        if (trend == 'bullish' and divergence != 'bearish') or (trend == 'bearish' and divergence != 'bullish'):
-            signal_type = 'LONG' if trend == 'bullish' else 'SHORT'
-            atr_mult_stop = 1.5
-            atr_mult_tp = 2.5
-            if signal_type == 'LONG':
-                stop = price - atr_mult_stop * atr_now
-                tp = price + atr_mult_tp * atr_now
-            else:
-                stop = price + atr_mult_stop * atr_now
-                tp = price - atr_mult_tp * atr_now
-            rr = abs(tp - price) / abs(price - stop)
-            if rr < 1.5:
-                return None
-            return {
-                'entry': price,
-                'tp': tp,
-                'stop': stop,
-                'type': signal_type,
-                'patterns': flag_patterns,
-                'stars': stars,
-                'total_conditions': len(conditions)
-            }
-    return None
+    if passed_conditions < 3:
+        return None
 
-# ─── حلقه اصلی با لاگ اضافی ───
+    if (trend == 'bullish' and divergence == 'bearish') or (trend == 'bearish' and divergence == 'bullish'):
+        return None
+
+    signal_type = 'LONG' if trend == 'bullish' else 'SHORT'
+
+    atr_mult_stop = 1.5
+    atr_mult_tp = 2.5
+
+    if signal_type == 'LONG':
+        stop = price - atr_mult_stop * atr_now
+        tp = price + atr_mult_tp * atr_now
+    else:
+        stop = price + atr_mult_stop * atr_now
+        tp = price - atr_mult_tp * atr_now
+
+    rr = abs(tp - price) / abs(price - stop)
+    if rr < 1.5:
+        return None
+
+    stars = "⭐" * passed_conditions
+    return {
+        'entry': price,
+        'tp': tp,
+        'stop': stop,
+        'type': signal_type,
+        'patterns': flag_patterns,
+        'stars': stars,
+        'passed': passed_conditions,
+        'total': total_conditions
+    }
+
+
+# ─── حلقه اصلی ───
 def main():
     print("🚀 ربات Multi-Coin & Multi-Timeframe با آلارم خودکار شروع شد")
     while True:
@@ -223,18 +252,6 @@ def main():
                 for tf in TIMEFRAMES:
                     df = get_ohlcv_df(symbol, tf)
                     df = calculate_indicators(df)
-
-                    # --- لاگ مانیتورینگ هر تایم‌فریم ---
-                    close_price = df['close'].iloc[-1]
-                    patterns = detect_candlestick_patterns(df)
-                    order_blocks = f"High:{df['OB_High'].iloc[-1]:.2f} Low:{df['OB_Low'].iloc[-1]:.2f}" if 'OB_High' in df else "None"
-                    print(
-                        f"[CMD] {symbol} | TF: {tf} | Close: {close_price:.4f} | "
-                        f"Change: {symbol_data['change']:.2f}% | "
-                        f"Patterns: {', '.join(patterns) if patterns else 'None'} | "
-                        f"Order Blocks: {order_blocks}"
-                    )
-
                     signal = check_signal(df, symbol, symbol_data['change'])
                     if signal:
                         tf_signals.append(signal)
@@ -251,9 +268,12 @@ def main():
                 msg = "🚨 Multi-Coin Alert 🚨\n"
                 for symbol, s in alerts:
                     msg += (
-                        f"{symbol} → {s['type']} | Entry: {s['entry']:.4f} | "
-                        f"TP: {s['tp']:.4f} | Stop: {s['stop']:.4f}\n"
-                        f"{'⭐'*s['stars']} ({s['stars']}/{s['total_conditions']})\n"
+                        f"{symbol}\n"
+                        f"➡️ نوع سیگنال: {s['type']}\n"
+                        f"💰 ورود: {s['entry']:.4f}\n"
+                        f"🎯 تارگت: {s['tp']:.4f}\n"
+                        f"🛑 استاپ: {s['stop']:.4f}\n"
+                        f"{s['stars']} ({s['passed']} از {s['total']} شرط)\n"
                     )
                     if s['patterns']:
                         msg += f"🔹 الگوها: {', '.join(s['patterns'])}\n"
@@ -269,5 +289,6 @@ def main():
             print(f"⚠️ خطا: {e}")
             time.sleep(30)
 
-# ─── اجرای ربات در Thread جدا برای keep_alive ───
-Thread(target=main).start()
+
+if __name__ == "__main__":
+    main()
