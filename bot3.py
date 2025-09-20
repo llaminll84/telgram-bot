@@ -1,4 +1,3 @@
-
 import time
 import os
 import ccxt
@@ -22,6 +21,7 @@ exchange = ccxt.kucoin()
 TOP_N = 80
 TIMEFRAMES = ['5m', '15m', '1h']
 
+
 def get_top_symbols():
     tickers = exchange.fetch_tickers()
     symbols = []
@@ -35,10 +35,12 @@ def get_top_symbols():
     symbols.sort(key=lambda x: x['volume'], reverse=True)
     return symbols[:TOP_N]
 
+
 def get_ohlcv_df(symbol, timeframe):
     ohlcv = exchange.fetch_ohlcv(symbol, timeframe)
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     return df.dropna()
+
 
 def calculate_indicators(df):
     df['EMA9'] = df['close'].ewm(span=9, adjust=False).mean()
@@ -80,7 +82,6 @@ def calculate_indicators(df):
     df['SwingHigh'] = df['high'][df['high'] == df['high'].rolling(5, center=True).max()]
     df['SwingLow'] = df['low'][df['low'] == df['low'].rolling(5, center=True).min()]
     return df
-
 def detect_rsi_divergence(df):
     if len(df) < 10:
         return None
@@ -102,6 +103,7 @@ def detect_rsi_divergence(df):
         return 'bearish'
     return None
 
+
 def detect_candlestick_patterns(df):
     patterns = []
     open_, close, high, low = df['open'].iloc[-1], df['close'].iloc[-1], df['high'].iloc[-1], df['low'].iloc[-1]
@@ -116,6 +118,7 @@ def detect_candlestick_patterns(df):
     if (high - close) > 2 * (high - open_):
         patterns.append('Hanging Man')
     return patterns
+
 
 def detect_pattern_flags(df):
     flag_patterns = []
@@ -133,6 +136,7 @@ def detect_pattern_flags(df):
     if (highs.max() - highs.min()) < 0.03 * closes.iloc[0] and (lows.max() - lows.min()) < 0.03 * closes.iloc[0]:
         flag_patterns.append('Triangle / Wedge')
     return flag_patterns
+
 
 def detect_setups(df):
     setups = []
@@ -152,6 +156,8 @@ def detect_setups(df):
         elif df['close'].iloc[-1] > df['close'].iloc[-3] and df['close'].iloc[-3] == df['close'].iloc[-2]:
             setups.append('Double Bottom')
     return setups
+
+
 def check_signal(df, symbol, change):
     if len(df) < 30:
         return None
@@ -163,7 +169,6 @@ def check_signal(df, symbol, change):
     elif price < df['EMA21'].iloc[-1]:
         trend = 'bearish'
 
-    # شرط حجم
     if df['volume'].iloc[-1] <= 1.5 * df['volume'].iloc[-21:-1].mean():
         return None
 
@@ -176,53 +181,25 @@ def check_signal(df, symbol, change):
     atr_avg = df['ATR'].rolling(14).mean().iloc[-1]
     atr_check = atr_now > atr_avg
 
-    # StochRSI
-    if trend == 'bullish':
-        stoch_check = df['StochRSI'].iloc[-1] < 0.2
-    else:
-        stoch_check = df['StochRSI'].iloc[-1] > 0.8
-
-    # ایچیموکو
-    if trend == 'bullish':
-        ichi_check = price > df['SenkouA'].iloc[-1] and price > df['SenkouB'].iloc[-1]
-    else:
-        ichi_check = price < df['SenkouA'].iloc[-1] and price < df['SenkouB'].iloc[-1]
+    stoch_check = df['StochRSI'].iloc[-1] < 0.2 if trend == 'bullish' else df['StochRSI'].iloc[-1] > 0.8
+    ichi_check = price > df['SenkouA'].iloc[-1] and price > df['SenkouB'].iloc[-1] if trend == 'bullish' else price < df['SenkouA'].iloc[-1] and price < df['SenkouB'].iloc[-1]
 
     if patterns and setups and atr_check and stoch_check and ichi_check:
-        if (trend == 'bullish' and divergence != 'bearish') or \
-           (trend == 'bearish' and divergence != 'bullish'):
-
+        if (trend == 'bullish' and divergence != 'bearish') or (trend == 'bearish' and divergence != 'bullish'):
             signal_type = 'LONG' if trend == 'bullish' else 'SHORT'
-
-            # --- استاپ و تارگت بر اساس ATR ---
             atr_mult_stop = 1.5
             atr_mult_tp = 2.5
-
-            if signal_type == 'LONG':
-                stop = price - atr_mult_stop * atr_now
-                tp = price + atr_mult_tp * atr_now
-            else:
-                stop = price + atr_mult_stop * atr_now
-                tp = price - atr_mult_tp * atr_now
-
-            # نسبت سود به ضرر
+            stop = price - atr_mult_stop * atr_now if signal_type == 'LONG' else price + atr_mult_stop * atr_now
+            tp = price + atr_mult_tp * atr_now if signal_type == 'LONG' else price - atr_mult_tp * atr_now
             rr = abs(tp - price) / abs(price - stop)
             if rr < 1.5:
                 return None
-
-            return {
-                'entry': price,
-                'tp': tp,
-                'stop': stop,
-                'type': signal_type,
-                'patterns': flag_patterns
-            }
+            return {'entry': price, 'tp': tp, 'stop': stop, 'type': signal_type, 'patterns': flag_patterns}
     return None
 
 
-# ─── حلقه اصلی ───
 def main():
-    print("🚀 ربات Multi-Coin & Multi-Timeframe با آلارم خودکار شروع شد")
+    print("🚀 ربات Multi-Coin & Multi-Timeframe با آلارم خودکار شروع شد", flush=True)
     while True:
         try:
             top_symbols = get_top_symbols()
@@ -231,12 +208,12 @@ def main():
                 symbol = symbol_data['symbol']
                 tf_signals = []
                 for tf in TIMEFRAMES:
+                    print(f"🔎 بررسی {symbol} در {tf}", flush=True)
                     df = get_ohlcv_df(symbol, tf)
                     df = calculate_indicators(df)
                     signal = check_signal(df, symbol, symbol_data['change'])
                     if signal:
                         tf_signals.append(signal)
-
                 if tf_signals:
                     longs = [s for s in tf_signals if s['type'] == 'LONG']
                     shorts = [s for s in tf_signals if s['type'] == 'SHORT']
@@ -248,28 +225,18 @@ def main():
             if alerts:
                 msg = "🚨 Multi-Coin Alert 🚨\n"
                 for symbol, s in alerts:
-                    msg += (
-                        f"{symbol}\n"
-                        f"➡️ نوع سیگنال: {s['type']}\n"
-                        f"💰 ورود: {s['entry']:.4f}\n"
-                        f"🎯 تارگت: {s['tp']:.4f}\n"
-                        f"🛑 استاپ: {s['stop']:.4f}\n"
-                    )
+                    msg += f"{symbol}\n➡️ نوع: {s['type']}\n💰 ورود: {s['entry']:.4f}\n🎯 تارگت: {s['tp']:.4f}\n🛑 استاپ: {s['stop']:.4f}\n"
                     if s['patterns']:
-                        msg += f"🔹 الگوهای تشخیص داده شده: {', '.join(s['patterns'])}\n"
+                        msg += f"🔹 الگوها: {', '.join(s['patterns'])}\n"
                     msg += "\n"
-                try:
-                    bot.send_message(chat_id=CHAT_ID, text=msg)
-                except Exception as e:
-                    print(f"[Telegram Error] {e}")
+                bot.send_message(chat_id=CHAT_ID, text=msg)
 
-            print("⏳ صبر برای ۵ دقیقه بعدی ...\n")
+            print("⏳ صبر برای ۵ دقیقه بعدی ...", flush=True)
             time.sleep(300)
         except Exception as e:
-            print(f"⚠️ خطا: {e}")
+            print(f"⚠️ خطا: {e}", flush=True)
             time.sleep(30)
 
 
 if __name__ == "__main__":
     main()
-    
