@@ -19,7 +19,7 @@ bot.send_message(chat_id=CHAT_ID, text="✅ ربات با موفقیت راه‌
 
 # ─── صرافی کوکوین ───
 exchange = ccxt.kucoin()
-TOP_N = 10
+TOP_N = 80
 TIMEFRAMES = ['5m', '15m', '1h']
 
 def get_top_symbols():
