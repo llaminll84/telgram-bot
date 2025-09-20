@@ -23,9 +23,8 @@ exchange = ccxt.kucoin()
 TOP_N = 85
 TIMEFRAMES = ['5m', '15m', '1h']
 
-# ─── تابع‌ها با کامنت برای توضیح ───
+# ─── توابع ───
 
-# دریافت نمادهای پرحجم
 def get_top_symbols():
     tickers = exchange.fetch_tickers()
     symbols = []
@@ -39,13 +38,11 @@ def get_top_symbols():
     symbols.sort(key=lambda x: x['volume'], reverse=True)
     return symbols[:TOP_N]
 
-# گرفتن دیتای OHLCV
 def get_ohlcv_df(symbol, timeframe):
     ohlcv = exchange.fetch_ohlcv(symbol, timeframe)
     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     return df.dropna()
 
-# محاسبه اندیکاتورها
 def calculate_indicators(df):
     df['EMA9'] = df['close'].ewm(span=9, adjust=False).mean()
     df['EMA21'] = df['close'].ewm(span=21, adjust=False).mean()
@@ -87,7 +84,6 @@ def calculate_indicators(df):
     df['SwingLow'] = df['low'][df['low'] == df['low'].rolling(5, center=True).min()]
     return df
 
-# شناسایی واگرایی RSI
 def detect_rsi_divergence(df):
     if len(df) < 10:
         return None
@@ -109,7 +105,6 @@ def detect_rsi_divergence(df):
         return 'bearish'
     return None
 
-# شناسایی الگوهای کندل
 def detect_candlestick_patterns(df):
     patterns = []
     open_, close, high, low = df['open'].iloc[-1], df['close'].iloc[-1], df['high'].iloc[-1], df['low'].iloc[-1]
@@ -125,8 +120,6 @@ def detect_candlestick_patterns(df):
         patterns.append('Hanging Man')
     return patterns
 
-# ادامه نیمه دوم کد در پیام بعدی…
-# شناسایی الگوهای پرچم و مثلث
 def detect_pattern_flags(df):
     flag_patterns = []
     if len(df) < 10:
@@ -144,7 +137,6 @@ def detect_pattern_flags(df):
         flag_patterns.append('Triangle / Wedge')
     return flag_patterns
 
-# شناسایی ستاپ‌ها
 def detect_setups(df):
     setups = []
     if df['close'].iloc[-1] > df['close'][-21:-1].max() * 1.01:
@@ -164,7 +156,6 @@ def detect_setups(df):
             setups.append('Double Bottom')
     return setups
 
-# بررسی سیگنال و محاسبه ستاره‌ها
 def check_signal(df, symbol, change):
     if len(df) < 30:
         return None
@@ -176,7 +167,6 @@ def check_signal(df, symbol, change):
     elif price < df['EMA21'].iloc[-1]:
         trend = 'bearish'
 
-    # شرط حجم
     if df['volume'].iloc[-1] <= 1.5 * df['volume'].iloc[-21:-1].mean():
         return None
 
@@ -189,43 +179,26 @@ def check_signal(df, symbol, change):
     atr_avg = df['ATR'].rolling(14).mean().iloc[-1]
     atr_check = atr_now > atr_avg
 
-    # StochRSI
-    if trend == 'bullish':
-        stoch_check = df['StochRSI'].iloc[-1] < 0.2
-    else:
-        stoch_check = df['StochRSI'].iloc[-1] > 0.8
+    stoch_check = (df['StochRSI'].iloc[-1] < 0.2) if trend == 'bullish' else (df['StochRSI'].iloc[-1] > 0.8)
+    ichi_check = (price > df['SenkouA'].iloc[-1] and price > df['SenkouB'].iloc[-1]) if trend == 'bullish' else (price < df['SenkouA'].iloc[-1] and price < df['SenkouB'].iloc[-1])
 
-    # ایچیموکو
-    if trend == 'bullish':
-        ichi_check = price > df['SenkouA'].iloc[-1] and price > df['SenkouB'].iloc[-1]
-    else:
-        ichi_check = price < df['SenkouA'].iloc[-1] and price < df['SenkouB'].iloc[-1]
-
-    # شمارنده شرط‌ها
     conditions = [patterns, setups, atr_check, stoch_check, ichi_check, True if divergence else True]
     stars = sum([1 if c else 0 for c in conditions])
 
     if patterns and setups and atr_check and stoch_check and ichi_check:
-        if (trend == 'bullish' and divergence != 'bearish') or \
-           (trend == 'bearish' and divergence != 'bullish'):
-
+        if (trend == 'bullish' and divergence != 'bearish') or (trend == 'bearish' and divergence != 'bullish'):
             signal_type = 'LONG' if trend == 'bullish' else 'SHORT'
-
-            # --- استاپ و تارگت بر اساس ATR ---
             atr_mult_stop = 1.5
             atr_mult_tp = 2.5
-
             if signal_type == 'LONG':
                 stop = price - atr_mult_stop * atr_now
                 tp = price + atr_mult_tp * atr_now
             else:
                 stop = price + atr_mult_stop * atr_now
                 tp = price - atr_mult_tp * atr_now
-
             rr = abs(tp - price) / abs(price - stop)
             if rr < 1.5:
                 return None
-
             return {
                 'entry': price,
                 'tp': tp,
@@ -237,7 +210,7 @@ def check_signal(df, symbol, change):
             }
     return None
 
-# ─── حلقه اصلی ربات ───
+# ─── حلقه اصلی با لاگ اضافی ───
 def main():
     print("🚀 ربات Multi-Coin & Multi-Timeframe با آلارم خودکار شروع شد")
     while True:
@@ -250,6 +223,18 @@ def main():
                 for tf in TIMEFRAMES:
                     df = get_ohlcv_df(symbol, tf)
                     df = calculate_indicators(df)
+
+                    # --- لاگ مانیتورینگ هر تایم‌فریم ---
+                    close_price = df['close'].iloc[-1]
+                    patterns = detect_candlestick_patterns(df)
+                    order_blocks = f"High:{df['OB_High'].iloc[-1]:.2f} Low:{df['OB_Low'].iloc[-1]:.2f}" if 'OB_High' in df else "None"
+                    print(
+                        f"[CMD] {symbol} | TF: {tf} | Close: {close_price:.4f} | "
+                        f"Change: {symbol_data['change']:.2f}% | "
+                        f"Patterns: {', '.join(patterns) if patterns else 'None'} | "
+                        f"Order Blocks: {order_blocks}"
+                    )
+
                     signal = check_signal(df, symbol, symbol_data['change'])
                     if signal:
                         tf_signals.append(signal)
