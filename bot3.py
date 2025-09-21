@@ -158,7 +158,7 @@ def main():
                     if signal:
                         signal_count += 1
                         tf_signals.append(signal)
-                if signal_count >= 2:  # تایید دو تایم‌فریم
+                if signal_count >= 1:  # تایید دو تایم‌فریم
                     alerts.append((symbol, tf_signals))
 
             if alerts:
