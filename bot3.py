@@ -20,7 +20,6 @@ bot.send_message(chat_id=CHAT_ID, text="✅ ربات با موفقیت راه‌
 # ─── صرافی کوکوین
 exchange = ccxt.kucoin()
 
-TOP_N = 60  # تعداد کوین‌ها
 TOP_N = 80  # تعداد کوین‌ها
 TIMEFRAMES = ['5m', '15m', '1h']
 
@@ -55,7 +54,10 @@ def calculate_indicators(df):
     df['BB_Upper'] = df['BB_Mid'] + 2 * df['BB_Std']
     df['BB_Lower'] = df['BB_Mid'] - 2 * df['BB_Std']
     df['ATR'] = df['high'].combine(df['low'], max) - df['low'].combine(df['close'].shift(), min)
-    df['StochRSI'] = (df['close'] - df['close'].rolling(14).min()) / (df['close'].rolling(14).max() - df['close'].rolling(14).min())
+    df['StochRSI'] = (
+        (df['close'] - df['close'].rolling(14).min())
+        / (df['close'].rolling(14).max() - df['close'].rolling(14).min())
+    )
     df['Tenkan'] = (df['high'].rolling(9).max() + df['low'].rolling(9).min()) / 2
     df['Kijun'] = (df['high'].rolling(26).max() + df['low'].rolling(26).min()) / 2
     df['SenkouA'] = ((df['Tenkan'] + df['Kijun']) / 2).shift(26)
@@ -106,13 +108,16 @@ def check_signal(df, symbol, change):
     atr_check = df['ATR'].iloc[-1] > df['ATR'].rolling(14).mean().iloc[-1]
 
     if change >= 1 and trend == 'bullish' and any(
-            p in patterns for p in ['Bullish Engulfing', 'Hammer', 'Morning Star']) and volume_check and stoch_rsi_check and atr_check:
+        p in patterns for p in ['Bullish Engulfing', 'Hammer', 'Morning Star']
+    ) and volume_check and stoch_rsi_check and atr_check:
         entry = price
         tp = price * 1.01
         stop = price * 0.995
         signal_type = 'LONG'
+
     elif change <= -1 and trend == 'bearish' and any(
-            p in patterns for p in ['Bearish Engulfing', 'Hanging Man', 'Evening Star']) and volume_check and stoch_rsi_check and atr_check:
+        p in patterns for p in ['Bearish Engulfing', 'Hanging Man', 'Evening Star']
+    ) and volume_check and stoch_rsi_check and atr_check:
         entry = price
         tp = price * 0.99
         stop = price * 1.005
@@ -144,7 +149,12 @@ def main():
                     df = get_ohlcv_df(symbol, tf)
                     df = calculate_indicators(df)
                     signal = check_signal(df, symbol, symbol_data['change'])
-                    print(f"[CMD] {symbol} | TF: {tf} | Close: {df['close'].iloc[-1]:.4f} | Change: {symbol_data['change']:.2f}% | Patterns: {signal['patterns'] if signal else 'None'} | Order Blocks: {signal['order_blocks'] if signal else 'None'}")
+                    print(
+                        f"[CMD] {symbol} | TF: {tf} | Close: {df['close'].iloc[-1]:.4f} "
+                        f"| Change: {symbol_data['change']:.2f}% "
+                        f"| Patterns: {signal['patterns'] if signal else 'None'} "
+                        f"| Order Blocks: {signal['order_blocks'] if signal else 'None'}"
+                    )
                     if signal:
                         signal_count += 1
                         tf_signals.append(signal)
@@ -155,13 +165,23 @@ def main():
                 msg = "🚨 Multi-Coin Alert 🚨\n"
                 for symbol, sigs in alerts:
                     for s in sigs:
-                        msg += f"{symbol}\nType: {s['type']}\nEntry: {s['entry']:.4f}\nTP: {s['tp']:.4f}\nStop: {s['stop']:.4f}\nPatterns: {s['patterns']}\nOrder Blocks: {s['order_blocks']}\n\n"
+                        msg += (
+                            f"{symbol}\n"
+                            f"Type: {s['type']}\n"
+                            f"Entry: {s['entry']:.4f}\n"
+                            f"TP: {s['tp']:.4f}\n"
+                            f"Stop: {s['stop']:.4f}\n"
+                            f"Patterns: {s['patterns']}\n"
+                            f"Order Blocks: {s['order_blocks']}\n\n"
+                        )
                 try:
                     bot.send_message(chat_id=CHAT_ID, text=msg)
                 except Exception as e:
                     print(f"[Telegram Error] {e}")
+
             print("⏳ صبر برای ۵ دقیقه بعدی ...\n")
             time.sleep(300)
+
         except Exception as e:
             print(f"⚠️ خطا: {e}")
             time.sleep(30)
@@ -169,4 +189,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
