@@ -23,6 +23,9 @@ exchange = ccxt.kucoin()
 TOP_N = 80  # تعداد کوین‌ها
 TIMEFRAMES = ['5m', '15m', '1h']
 
+# ─── تنظیمات مدیریت ریسک
+BALANCE = 1000  # بالانس فرضی (میتونی با API بیاری)
+RISK_PERCENT = 0.01  # ریسک در هر معامله = 1%
 
 def get_top_symbols():
     tickers = exchange.fetch_tickers()
@@ -47,21 +50,48 @@ def get_ohlcv_df(symbol, timeframe):
 def calculate_indicators(df):
     df['EMA9'] = df['close'].ewm(span=9, adjust=False).mean()
     df['EMA21'] = df['close'].ewm(span=21, adjust=False).mean()
+    df['EMA50'] = df['close'].ewm(span=50, adjust=False).mean()
+    df['EMA200'] = df['close'].ewm(span=200, adjust=False).mean()
+
+    # MACD
     df['MACD'] = df['close'].ewm(span=12, adjust=False).mean() - df['close'].ewm(span=26, adjust=False).mean()
     df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+
+    # باند بولینگر
     df['BB_Mid'] = df['close'].rolling(20).mean()
     df['BB_Std'] = df['close'].rolling(20).std()
     df['BB_Upper'] = df['BB_Mid'] + 2 * df['BB_Std']
     df['BB_Lower'] = df['BB_Mid'] - 2 * df['BB_Std']
-    df['ATR'] = df['high'].combine(df['low'], max) - df['low'].combine(df['close'].shift(), min)
+
+    # ATR
+    df['H-L'] = df['high'] - df['low']
+    df['H-C'] = abs(df['high'] - df['close'].shift())
+    df['L-C'] = abs(df['low'] - df['close'].shift())
+    df['TR'] = df[['H-L', 'H-C', 'L-C']].max(axis=1)
+    df['ATR'] = df['TR'].rolling(14).mean()
+
+    # StochRSI
     df['StochRSI'] = (
         (df['close'] - df['close'].rolling(14).min())
         / (df['close'].rolling(14).max() - df['close'].rolling(14).min())
     )
+
+    # ایچیموکو
     df['Tenkan'] = (df['high'].rolling(9).max() + df['low'].rolling(9).min()) / 2
     df['Kijun'] = (df['high'].rolling(26).max() + df['low'].rolling(26).min()) / 2
     df['SenkouA'] = ((df['Tenkan'] + df['Kijun']) / 2).shift(26)
     df['SenkouB'] = ((df['high'].rolling(52).max() + df['low'].rolling(52).min()) / 2).shift(26)
+
+    # ADX (برای فیلتر قدرت روند)
+    df['DMplus'] = np.where((df['high'] - df['high'].shift()) > (df['low'].shift() - df['low']), 
+                            np.maximum(df['high'] - df['high'].shift(), 0), 0)
+    df['DMminus'] = np.where((df['low'].shift() - df['low']) > (df['high'] - df['high'].shift()), 
+                             np.maximum(df['low'].shift() - df['low'], 0), 0)
+    df['DIplus'] = 100 * (df['DMplus'].ewm(alpha=1/14).mean() / df['ATR'])
+    df['DIminus'] = 100 * (df['DMminus'].ewm(alpha=1/14).mean() / df['ATR'])
+    df['DX'] = 100 * (abs(df['DIplus'] - df['DIminus']) / (df['DIplus'] + df['DIminus']))
+    df['ADX'] = df['DX'].ewm(alpha=1/14).mean()
+
     return df
 
 
@@ -81,8 +111,6 @@ def detect_candlestick_patterns(df):
     if abs(close - open_) / (high - low + 1e-9) < 0.1:
         patterns.append('Doji')
     return patterns
-
-
 def detect_order_block(df):
     recent = df[-5:]
     blocks = []
@@ -93,6 +121,26 @@ def detect_order_block(df):
     return blocks
 
 
+def check_trend_strength(df):
+    """ فیلتر قدرت روند با EMA و ADX """
+    if df['EMA50'].iloc[-1] > df['EMA200'].iloc[-1] and df['ADX'].iloc[-1] > 20:
+        return "strong_bullish"
+    elif df['EMA50'].iloc[-1] < df['EMA200'].iloc[-1] and df['ADX'].iloc[-1] > 20:
+        return "strong_bearish"
+    else:
+        return "weak"
+
+
+def position_size(entry, stop, balance=BALANCE, risk_percent=RISK_PERCENT):
+    """ مدیریت ریسک داینامیک بر اساس ATR و درصد ریسک """
+    risk_amount = balance * risk_percent
+    stop_distance = abs(entry - stop)
+    if stop_distance == 0:
+        return 0
+    size = risk_amount / stop_distance
+    return size
+
+
 def check_signal(df, symbol, change):
     price = df['close'].iloc[-1]
     trend = 'neutral'
@@ -101,27 +149,34 @@ def check_signal(df, symbol, change):
     elif price < df['SenkouA'].iloc[-1] and price < df['SenkouB'].iloc[-1]:
         trend = 'bearish'
 
+    # فیلتر قدرت روند
+    trend_strength = check_trend_strength(df)
+
     patterns = detect_candlestick_patterns(df)
     order_blocks = detect_order_block(df)
     volume_check = df['volume'].iloc[-1] > df['volume'].rolling(20).mean().iloc[-1] * 1.5
     stoch_rsi_check = df['StochRSI'].iloc[-1] > 0.8 if trend == 'bearish' else df['StochRSI'].iloc[-1] < 0.2
-    atr_check = df['ATR'].iloc[-1] > df['ATR'].rolling(14).mean().iloc[-1]
+    atr = df['ATR'].iloc[-1]
+    atr_check = atr > df['ATR'].rolling(14).mean().iloc[-1]
 
-    if change >= 1 and trend == 'bullish' and any(
+    if change >= 1 and trend == 'bullish' and trend_strength == "strong_bullish" and any(
         p in patterns for p in ['Bullish Engulfing', 'Hammer', 'Morning Star']
     ) and volume_check and stoch_rsi_check and atr_check:
         entry = price
-        tp = price * 1.01
-        stop = price * 0.995
+        stop = price - atr * 1.5
+        tp = price + atr * 2
         signal_type = 'LONG'
+        size = position_size(entry, stop)
 
-    elif change <= -1 and trend == 'bearish' and any(
+    elif change <= -1 and trend == 'bearish' and trend_strength == "strong_bearish" and any(
         p in patterns for p in ['Bearish Engulfing', 'Hanging Man', 'Evening Star']
     ) and volume_check and stoch_rsi_check and atr_check:
         entry = price
-        tp = price * 0.99
-        stop = price * 1.005
+        stop = price + atr * 1.5
+        tp = price - atr * 2
         signal_type = 'SHORT'
+        size = position_size(entry, stop)
+
     else:
         return None
 
@@ -131,7 +186,9 @@ def check_signal(df, symbol, change):
         'stop': stop,
         'type': signal_type,
         'patterns': patterns,
-        'order_blocks': order_blocks
+        'order_blocks': order_blocks,
+        'trend_strength': trend_strength,
+        'size': size
     }
 
 
@@ -152,13 +209,14 @@ def main():
                     print(
                         f"[CMD] {symbol} | TF: {tf} | Close: {df['close'].iloc[-1]:.4f} "
                         f"| Change: {symbol_data['change']:.2f}% "
+                        f"| TrendStrength: {signal['trend_strength'] if signal else 'None'} "
                         f"| Patterns: {signal['patterns'] if signal else 'None'} "
                         f"| Order Blocks: {signal['order_blocks'] if signal else 'None'}"
                     )
                     if signal:
                         signal_count += 1
                         tf_signals.append(signal)
-                if signal_count >= 1:  # تایید دو تایم‌فریم
+                if signal_count >= 1:  # تایید حداقل یک تایم‌فریم (میتونی تغییر بدی به 2)
                     alerts.append((symbol, tf_signals))
 
             if alerts:
@@ -171,6 +229,8 @@ def main():
                             f"Entry: {s['entry']:.4f}\n"
                             f"TP: {s['tp']:.4f}\n"
                             f"Stop: {s['stop']:.4f}\n"
+                            f"Risk Size: {s['size']:.4f}\n"
+                            f"TrendStrength: {s['trend_strength']}\n"
                             f"Patterns: {s['patterns']}\n"
                             f"Order Blocks: {s['order_blocks']}\n\n"
                         )
