@@ -131,39 +131,117 @@ def position_size(entry, stop, risk=0.01, capital=1000):
     trade_risk = abs(entry - stop)
     size = risk_amount / trade_risk if trade_risk != 0 else 0
     return size
-def generate_signal(df):
+def generate_signal(df, symbol=None):
+    """
+    تولید سیگنال و متن پیام با:
+    - شمارش ۵ شرط (روند، الگو، اوردر بلاک، حجم+StochRSI، ATR)
+    - نمایش تعداد شروط تایید شده به صورت ستاره ⭐
+    - ارسال جزئیات خط به خط (multiline)
+    """
     trend = check_trend_strength(df)
     patterns = detect_candlestick_patterns(df)
     order_blocks = detect_order_block(df)
     fibonacci_levels = calculate_fibonacci(df)
 
-    signal = None
-    stop_loss = None
-    take_profit = None
-
-    atr = df['ATR'].iloc[-1]
+    atr = df['ATR'].iloc[-1] if 'ATR' in df.columns else None
     entry = df['close'].iloc[-1]
+    volume_mean = df['volume'].rolling(20).mean().iloc[-1] if len(df) >= 20 else df['volume'].mean()
+    volume_check = df['volume'].iloc[-1] > volume_mean * 1.5
+    stoch = df['StochRSI'].iloc[-1] if 'StochRSI' in df.columns else None
+    stoch_buy = (stoch < 0.2) if (stoch is not None and not np.isnan(stoch)) else False
+    stoch_sell = (stoch > 0.8) if (stoch is not None and not np.isnan(stoch)) else False
+    atr_mean = df['ATR'].rolling(14).mean().iloc[-1] if 'ATR' in df.columns and len(df) >= 14 else None
+    atr_check = False
+    if (atr is not None) and (atr_mean is not None) and (not np.isnan(atr_mean)):
+        atr_check = atr > atr_mean
 
-    # ─── شرایط ورود خرید ───
-    if "Bullish Engulfing" in patterns or "Morning Star" in patterns or "Bullish Order Block" in order_blocks:
-        if "bullish" in trend:
-            stop_loss = entry - atr
-            take_profit = entry + (atr * 2)
-            signal = f"📈 خرید (Bullish) | Entry: {entry:.2f}, SL: {stop_loss:.2f}, TP: {take_profit:.2f}"
+    # ----- پنج شرط (برای خرید / فروش) -----
+    cond_trend_buy = ('bullish' in trend)
+    cond_trend_sell = ('bearish' in trend)
 
-    # ─── شرایط ورود فروش ───
-    elif "Bearish Engulfing" in patterns or "Evening Star" in patterns or "Bearish Order Block" in order_blocks:
-        if "bearish" in trend:
-            stop_loss = entry + atr
-            take_profit = entry - (atr * 2)
-            signal = f"📉 فروش (Bearish) | Entry: {entry:.2f}, SL: {stop_loss:.2f}, TP: {take_profit:.2f}"
+    cond_pattern_buy = any(p in patterns for p in ['Bullish Engulfing', 'Morning Star', 'Three White Soldiers'])
+    cond_pattern_sell = any(p in patterns for p in ['Bearish Engulfing', 'Evening Star', 'Three Black Crows'])
 
-    # ─── خروجی شامل فیبوناچی ───
-    if signal:
-        fibo_text = "\n📊 سطوح فیبوناچی:\n" + "\n".join([f"{k}: {v:.2f}" for k, v in fibonacci_levels.items()])
-        signal += fibo_text
+    cond_order_buy = any('Bullish' in ob for ob in order_blocks) if order_blocks else False
+    cond_order_sell = any('Bearish' in ob for ob in order_blocks) if order_blocks else False
 
-    return signal
+    cond_vol_stoch_buy = volume_check and stoch_buy
+    cond_vol_stoch_sell = volume_check and stoch_sell
+
+    buy_conditions = [cond_trend_buy, cond_pattern_buy, cond_order_buy, cond_vol_stoch_buy, atr_check]
+    sell_conditions = [cond_trend_sell, cond_pattern_sell, cond_order_sell, cond_vol_stoch_sell, atr_check]
+
+    buy_count = sum(1 for c in buy_conditions if c)
+    sell_count = sum(1 for c in sell_conditions if c)
+
+    # اگر هیچ شرطی برقرار نبود، برگردان None (هیچ پیامی ارسال نشود)
+    if buy_count == 0 and sell_count == 0:
+        return None
+
+    # تعیین جهت بر اساس بیشترین شروط تایید شده (در صورت تساوی: جهت با count بزرگ‌تر یا اولویت خرید)
+    if buy_count >= sell_count:
+        side = "BUY"
+        conditions_met = buy_count
+        chosen_conditions = buy_conditions
+        chosen_pattern_flag = cond_pattern_buy
+        chosen_order_flag = cond_order_buy
+        chosen_vol_stoch_flag = cond_vol_stoch_buy
+        chosen_trend_flag = cond_trend_buy
+    else:
+        side = "SELL"
+        conditions_met = sell_count
+        chosen_conditions = sell_conditions
+        chosen_pattern_flag = cond_pattern_sell
+        chosen_order_flag = cond_order_sell
+        chosen_vol_stoch_flag = cond_vol_stoch_sell
+        chosen_trend_flag = cond_trend_sell
+
+    # محاسبه SL/TP/Size بر اساس ATR (همان منطق قبلی)
+    if atr is None or np.isnan(atr):
+        # اگر ATR در دسترس نبود از یک فاصله پیش‌فرض استفاده کن
+        atr = (df['high'].iloc[-1] - df['low'].iloc[-1])
+    if side == "BUY":
+        stop = entry - atr * 1.5
+        tp = entry + atr * 2
+    else:
+        stop = entry + atr * 1.5
+        tp = entry - atr * 2
+
+    size = position_size(entry, stop)  # تابع position_size قبلاً تعریف شده
+
+    # ساخت پیام چندخطی با نمایش ستاره‌ها و وضعیت هر شرط
+    stars = "⭐" * int(conditions_met)
+    lines = []
+    if symbol:
+        lines.append(f"🔔 سیگنال برای {symbol}")
+    lines.append(f"نوع سیگنال: {side}")
+    lines.append(f"تعداد شروط تایید شده: {conditions_met}/5 {stars}")
+    lines.append("")  # خط خالی برای خوانایی
+
+    # نمایش وضعیت هر شرط بصورت جداگانه
+    lines.append(f"1) فیلتر روند: {trend} {'✅' if chosen_trend_flag else '❌'}")
+    lines.append(f"2) الگوهای کندلی: {patterns} {'✅' if chosen_pattern_flag else '❌'}")
+    lines.append(f"3) اوردر بلاک: {order_blocks} {'✅' if chosen_order_flag else '❌'}")
+    stoch_text = f"حجم={df['volume'].iloc[-1]:.2f}, StochRSI={stoch:.3f}" if stoch is not None else f"حجم={df['volume'].iloc[-1]:.2f}, StochRSI=N/A"
+    lines.append(f"4) حجم + StochRSI: {stoch_text} {'✅' if chosen_vol_stoch_flag else '❌'}")
+    atr_text = f"{atr:.6f}" if atr is not None else "N/A"
+    lines.append(f"5) ATR check: {atr_text} {'✅' if atr_check else '❌'}")
+
+    lines.append("")  # فاصله
+    lines.append(f"Entry: {entry:.6f}")
+    lines.append(f"Stop: {stop:.6f}")
+    lines.append(f"TP: {tp:.6f}")
+    lines.append(f"Size (units): {size:.6f}")
+
+    # فیبوناچی
+    lines.append("") 
+    lines.append("📊 سطوح فیبوناچی:")
+    for k, v in fibonacci_levels.items():
+        lines.append(f"  {k}: {v:.6f}")
+
+    # توضیح تکمیلی (اگر خواستی میشه در اینجا نکات اضافی هم قرار داد)
+    message = "\n".join(lines)
+    return message
 
 
 def fetch_ohlcv(symbol="BTC/USDT", timeframe="1h", limit=200):
@@ -185,11 +263,14 @@ def main():
     while True:
         try:
             df = fetch_ohlcv(symbol, timeframe)
-            signal = generate_signal(df)
+            signal_text = generate_signal(df, symbol=symbol)
 
-            if signal:
-                logging.info(signal)
-                bot.send_message(chat_id=CHAT_ID, text=signal)
+            if signal_text:
+                logging.info(signal_text)
+                try:
+                    bot.send_message(chat_id=CHAT_ID, text=signal_text)
+                except Exception as e:
+                    logging.error(f"[Telegram Error] {e}")
 
             time.sleep(60 * 5)  # هر ۵ دقیقه
         except Exception as e:
