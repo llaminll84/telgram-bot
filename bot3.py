@@ -326,11 +326,9 @@ def main():
 )
 
 ".join(f"[{tf}]
-{sig}" for tf, sig in signals if "نوع سیگنال: BUY" in sig)
-                        elif sell_count >= required_confirmations and sell_count > buy_count:
-                            final_signal = f"✅ سیگنال نهایی SELL برای {symbol} ({sell_count}/{len(timeframes)} تایم‌فریم)
-
-"
+final_signal += "\n\n".join(
+    f"[{tf}]\n{sig}" for tf, sig in signals if "نوع سیگنال: BUY" in sig
+)
                             final_signal += "
 
 ".join(f"[{tf}]
