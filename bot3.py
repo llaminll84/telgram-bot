@@ -1,4 +1,4 @@
-import timee
+import tim
 import os
 import logging
 import ccxt
