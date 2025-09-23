@@ -329,10 +329,11 @@ def main():
 final_signal += "\n\n".join(
     f"[{tf}]\n{sig}" for tf, sig in signals if "نوع سیگنال: BUY" in sig
 )
-                            final_signal += "
+"
+                           final_signal += "\n\n".join(
+    f"[{tf}]\n{sig}" for tf, sig in signals if "نوع سیگنال: SELL" in sig
+)
 
-".join(f"[{tf}]
-{sig}" for tf, sig in signals if "نوع سیگنال: SELL" in sig)
                         elif (buy_count >= required_confirmations or sell_count >= required_confirmations) and buy_count == sell_count:
                             final_signal = f"⚠️ تایم‌فریم‌ها سیگنال متناقض فرستادند برای {symbol}: BUY={buy_count}, SELL={sell_count}
 
