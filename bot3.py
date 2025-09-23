@@ -335,7 +335,7 @@ def main():
                         elif sell_count >= required_confirmations and sell_count > buy_count:
                             header = f"✅ سیگنال نهایی SELL برای {symbol} ({sell_count}/{len(timeframes)} تایم‌فریم)\n\n"
                             body = "\n\n".join(f"[{tf}]\n{sig}" for _side, tf, sig in sell_sigs)
-                            final_signal = header + body
+                            final_signal = header + body")
 
                         elif (buy_count >= required_confirmations or sell_count >= required_confirmations) and buy_count == sell_count:
                             header = f"⚠️ تایم‌فریم‌ها سیگنال متناقض فرستادند برای {symbol}: BUY={buy_count}, SELL={sell_count}\n\n"
