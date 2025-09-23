@@ -310,36 +310,37 @@ def main():
                         df = fetch_ohlcv(symbol, tf)
                         if df is None or df.empty:
                             continue
-                        signal_text = generate_signal(df, symbol=f"{symbol} ({tf})")
-                        if signal_text:
-                            signals.append((tf, signal_text))
+                        sig = generate_signal(df, symbol=f"{symbol} ({tf})")
+                        if sig:
+                            if "نوع سیگنال: BUY" in sig:
+                                signals.append(("BUY", tf, sig))
+                            elif "نوع سیگنال: SELL" in sig:
+                                signals.append(("SELL", tf, sig))
+                            else:
+                                signals.append(("UNKNOWN", tf, sig))
 
                     if signals:
-                        buy_count = sum(1 for _tf, sig in signals if "نوع سیگنال: BUY" in sig)
-                        sell_count = sum(1 for _tf, sig in signals if "نوع سیگنال: SELL" in sig)
+                        buy_sigs = [s for s in signals if s[0] == "BUY"]
+                        sell_sigs = [s for s in signals if s[0] == "SELL"]
+                        buy_count = len(buy_sigs)
+                        sell_count = len(sell_sigs)
 
                         final_signal = None
-                        if buy_count >= required_confirmations and buy_count > sell_count:
-                          final_signal = (
-    f"✅ سیگنال نهایی BUY برای {symbol} "
-    f"({buy_count}/{len(timeframes)} تایم‌فریم)\n\n"
-)
 
-final_signal += "\n\n".join(
-    f"[{tf}]\n{sig}" for tf, sig in signals if "نوع سیگنال: BUY" in sig
-)
-final_signal += "\n\n".join(
-    f"[{tf}]\n{sig}" for tf, sig in signals if "نوع سیگنال: SELL" in sig
-)
+                        if buy_count >= required_confirmations and buy_count > sell_count:
+                            header = f"✅ سیگنال نهایی BUY برای {symbol} ({buy_count}/{len(timeframes)} تایم‌فریم)\n\n"
+                            body = "\n\n".join(f"[{tf}]\n{sig}" for _side, tf, sig in buy_sigs)
+                            final_signal = header + body
+
+                        elif sell_count >= required_confirmations and sell_count > buy_count:
+                            header = f"✅ سیگنال نهایی SELL برای {symbol} ({sell_count}/{len(timeframes)} تایم‌فریم)\n\n"
+                            body = "\n\n".join(f"[{tf}]\n{sig}" for _side, tf, sig in sell_sigs)
+                            final_signal = header + body
 
                         elif (buy_count >= required_confirmations or sell_count >= required_confirmations) and buy_count == sell_count:
-                            final_signal = f"⚠️ تایم‌فریم‌ها سیگنال متناقض فرستادند برای {symbol}: BUY={buy_count}, SELL={sell_count}
-
-
-                            final_signal += "
-
-".join(f"[{tf}]
-{sig}" for tf, sig in signals)
+                            header = f"⚠️ تایم‌فریم‌ها سیگنال متناقض فرستادند برای {symbol}: BUY={buy_count}, SELL={sell_count}\n\n"
+                            body = "\n\n".join(f"[{tf}]\n{sig}" for _side, tf, sig in signals)
+                            final_signal = header + body
 
                         if final_signal:
                             logging.info(final_signal)
