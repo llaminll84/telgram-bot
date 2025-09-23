@@ -1,4 +1,4 @@
-import tim
+import time
 import os
 import logging
 import ccxt
@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 from telegram import Bot
 from keep_alive import keep_alive
+import requests
 
 # ─── فعال کردن سرور کوچک ───
 keep_alive()
@@ -19,25 +20,8 @@ bot.send_message(chat_id=CHAT_ID, text="✅ ربات استارت شد و به �
 # ─── تنظیمات لاگینگ ───
 logging.basicConfig(level=logging.INFO)
 
-# ─── تنظیم تایم‌فریم‌ها ───
-TIMEFRAMES = ["5m", "15m", "1h", "4h"]   # می‌تونی این لیست رو تغییر بدی
-CONFIRMATION_NEEDED = 2   # حداقل چند تایم‌فریم باید هم‌نظر باشن تا سیگنال بده
-
 # ─── اتصال به صرافی کوکوین ───
 exchange = ccxt.kucoin({"enableRateLimit": True})
-
-# ─── گرفتن ۸۰ ارز برتر بر اساس حجم معاملات ۲۴ ساعته ───
-def get_top_symbols(limit=80):
-    markets = exchange.load_markets()
-    tickers = exchange.fetch_tickers()
-    data = []
-    for symbol, ticker in tickers.items():
-        if "/USDT" in symbol:  # فقط جفت‌های USDT
-            volume = ticker.get("quoteVolume", 0)
-            data.append((symbol, volume))
-    data = sorted(data, key=lambda x: x[1], reverse=True)
-    top_symbols = [s[0] for s in data[:limit]]
-    return top_symbols
 
 # ─── محاسبه ایچیموکو ───
 def ichimoku(df):
@@ -77,6 +61,7 @@ def calculate_atr(df, period=14):
     df['TR'] = df[['H-L', 'H-C', 'L-C']].max(axis=1)
     df['ATR'] = df['TR'].rolling(window=period).mean()
     return df
+
 # ─── تشخیص الگوهای کندلی ───
 def detect_candlestick_patterns(df):
     patterns = []
@@ -95,7 +80,6 @@ def detect_candlestick_patterns(df):
         (df['close'].iloc[-1] < (df['open'].iloc[-2] + df['close'].iloc[-2]) / 2)):
         patterns.append('Evening Star')
     return patterns
-
 # ─── تشخیص اوردر بلاک ───
 def detect_order_block(df, period=20):
     order_blocks = []
@@ -167,149 +151,71 @@ def fetch_ohlcv(symbol="BTC/USDT", timeframe="1h", limit=200):
     df = calculate_stoch_rsi(df)
     df = calculate_atr(df)
     return df
-# ─── تولید سیگنال و پیام چندخطی ───
-def generate_signal(df, symbol=None):
-    trend = check_trend_strength(df)
-    patterns = detect_candlestick_patterns(df)
-    order_blocks = detect_order_block(df)
-    divergence = detect_divergence(df)
-    fibonacci_levels = calculate_fibonacci(df)
-    atr = df['ATR'].iloc[-1] if 'ATR' in df.columns else None
-    entry = df['close'].iloc[-1]
-    volume_mean = df['volume'].rolling(20).mean().iloc[-1] if len(df) >= 20 else df['volume'].mean()
-    volume_check = df['volume'].iloc[-1] > volume_mean * 1.5
-    stoch = df['StochRSI'].iloc[-1] if 'StochRSI' in df.columns else None
-    stoch_buy = (stoch < 0.2) if (stoch is not None and not np.isnan(stoch)) else False
-    stoch_sell = (stoch > 0.8) if (stoch is not None and not np.isnan(stoch)) else False
-    atr_mean = df['ATR'].rolling(14).mean().iloc[-1] if 'ATR' in df.columns and len(df) >= 14 else None
-    atr_check = False
-    if (atr is not None) and (atr_mean is not None) and (not np.isnan(atr_mean)):
-        atr_check = atr > atr_mean
 
-    # ----- شش شرط برای BUY / SELL -----
-    cond_trend_buy = ('bullish' in trend)
-    cond_trend_sell = ('bearish' in trend)
-    cond_pattern_buy = any(p in patterns for p in ['Bullish Engulfing', 'Morning Star', 'Three White Soldiers'])
-    cond_pattern_sell = any(p in patterns for p in ['Bearish Engulfing', 'Evening Star', 'Three Black Crows'])
-    cond_order_buy = any('Bullish' in ob for ob in order_blocks) if order_blocks else False
-    cond_order_sell = any('Bearish' in ob for ob in order_blocks) if order_blocks else False
-    cond_vol_stoch_buy = volume_check and stoch_buy
-    cond_vol_stoch_sell = volume_check and stoch_sell
-    cond_divergence_buy = divergence == 'bullish_divergence'
-    cond_divergence_sell = divergence == 'bearish_divergence'
+# ─── دریافت 80 ارز برتر کوکوین بر اساس حجم 24 ساعته ───
+def get_top_80_kucoin_symbols():
+    url = "https://api.kucoin.com/api/v1/market/allTickers"
+    try:
+        response = requests.get(url, timeout=10).json()
+        tickers = response['data']['ticker']
+        tickers_sorted = sorted(tickers, key=lambda x: float(x['volValue']), reverse=True)
+        symbols = [t['symbol'] for t in tickers_sorted if t['symbol'].endswith('USDT')]
+        return symbols[:80]
+    except Exception as e:
+        logging.error(f"❌ خطا در گرفتن نمادها: {e}")
+        return []
+# ─── تولید سیگنال و پیام چندخطی با تایم‌فریم‌های متعدد ───
+def generate_multiframe_signal(symbol, timeframes=["5m","15m","1h","4h"]):
+    messages = []
+    signals_count = {"BUY":0, "SELL":0}
+    frame_signals = {}
 
-    buy_conditions = [cond_trend_buy, cond_pattern_buy, cond_order_buy, cond_vol_stoch_buy, atr_check, cond_divergence_buy]
-    sell_conditions = [cond_trend_sell, cond_pattern_sell, cond_order_sell, cond_vol_stoch_sell, atr_check, cond_divergence_sell]
+    for tf in timeframes:
+        df = fetch_ohlcv(symbol, tf)
+        msg = generate_signal(df, symbol=f"{symbol} ({tf})")
+        frame_signals[tf] = msg
+        if msg:
+            if "BUY" in msg.splitlines()[1]:
+                signals_count["BUY"] += 1
+            elif "SELL" in msg.splitlines()[1]:
+                signals_count["SELL"] += 1
+        messages.append(msg)
 
-    buy_count = sum(1 for c in buy_conditions if c)
-    sell_count = sum(1 for c in sell_conditions if c)
+    # تصمیم نهایی بر اساس تایید حداقل 2 تایم‌فریم
+    final_signal = None
+    if signals_count["BUY"] >= 2:
+        final_signal = f"🔔 **سیگنال BUY** برای {symbol} تایید شده توسط {signals_count['BUY']} تایم‌فریم"
+    elif signals_count["SELL"] >= 2:
+        final_signal = f"🔔 **سیگنال SELL** برای {symbol} تایید شده توسط {signals_count['SELL']} تایم‌فریم"
 
-    if buy_count == 1 and sell_count == 1:
-        return None
-
-    if buy_count >= sell_count:
-        side = "BUY"
-        conditions_met = buy_count
-        chosen_conditions = buy_conditions
-        chosen_pattern_flag = cond_pattern_buy
-        chosen_order_flag = cond_order_buy
-        chosen_vol_stoch_flag = cond_vol_stoch_buy
-        chosen_trend_flag = cond_trend_buy
-        chosen_divergence_flag = cond_divergence_buy
-    else:
-        side = "SELL"
-        conditions_met = sell_count
-        chosen_conditions = sell_conditions
-        chosen_pattern_flag = cond_pattern_sell
-        chosen_order_flag = cond_order_sell
-        chosen_vol_stoch_flag = cond_vol_stoch_sell
-        chosen_trend_flag = cond_trend_sell
-        chosen_divergence_flag = cond_divergence_sell
-
-    if atr is None or np.isnan(atr):
-        atr = (df['high'].iloc[-1] - df['low'].iloc[-1])
-    if side == "BUY":
-        stop = entry - atr * 1.5
-        tp = entry + atr * 2
-    else:
-        stop = entry + atr * 1.5
-        tp = entry - atr * 2
-
-    size = position_size(entry, stop)
-
-    stars = "⭐" * int(conditions_met)
-    lines = []
-    if symbol:
-        lines.append(f"🔔 سیگنال برای {symbol}")
-    lines.append(f"نوع سیگنال: {side}")
-    lines.append(f"تعداد شروط تایید شده: {conditions_met}/6 {stars}")
-    lines.append("")
-    lines.append(f"1) فیلتر روند: {trend} {'✅' if chosen_trend_flag else '❌'}")
-    lines.append(f"2) الگوهای کندلی: {patterns} {'✅' if chosen_pattern_flag else '❌'}")
-    lines.append(f"3) اوردر بلاک: {order_blocks} {'✅' if chosen_order_flag else '❌'}")
-    stoch_text = f"حجم={df['volume'].iloc[-1]:.2f}, StochRSI={stoch:.3f}" if stoch is not None else f"حجم={df['volume'].iloc[-1]:.2f}, StochRSI=N/A"
-    lines.append(f"4) حجم + StochRSI: {stoch_text} {'✅' if chosen_vol_stoch_flag else '❌'}")
-    atr_text = f"{atr:.6f}" if atr is not None else "N/A"
-    lines.append(f"5) ATR check: {atr_text} {'✅' if atr_check else '❌'}")
-    lines.append(f"6) واگرایی: {divergence if divergence else 'N/A'} {'✅' if chosen_divergence_flag else '❌'}")
-    lines.append("")
-    lines.append(f"Entry: {entry:.6f}")
-    lines.append(f"Stop: {stop:.6f}")
-    lines.append(f"TP: {tp:.6f}")
-    lines.append(f"Size (units): {size:.6f}")
-    lines.append("")
-    lines.append("📊 سطوح فیبوناچی:")
-    for k, v in fibonacci_levels.items():
-        lines.append(f"  {k}: {v:.6f}")
-    message = "\n".join(lines)
-    return message
-
-# ─── تابع بررسی چند تایم‌فریم برای هر نماد ───
-def check_multi_timeframes(symbol):
-    # لیستی از سیگنال‌ها برای هر تایم‌فریم
-    tf_signals = {}
-    for tf in TIMEFRAMES:
-        try:
-            df_tf = fetch_ohlcv(symbol=symbol, timeframe=tf, limit=200)
-            sig = None
-            if df_tf is not None:
-                sig = generate_signal(df_tf, symbol=f"{symbol} ({tf})")
-            tf_signals[tf] = sig
-        except Exception as e:
-            logging.error(f"❌ خطا در {symbol} تایم‌فریم {tf}: {e}")
-            tf_signals[tf] = None
-
-    # محاسبه تعداد BUY / SELL در تایم‌فریم‌ها
-    buy_count = sum(1 for sig in tf_signals.values() if sig is not None and "BUY" in sig)
-    sell_count = sum(1 for sig in tf_signals.values() if sig is not None and "SELL" in sig)
-
-    if buy_count >= CONFIRMATION_NEEDED:
-        return "BUY", tf_signals
-    elif sell_count >= CONFIRMATION_NEEDED:
-        return "SELL", tf_signals
-    else:
-        return None, tf_signals
+    return final_signal, messages
 
 # ─── حلقه اصلی ───
 def main():
-    symbols = get_top_symbols(limit=80)
+    timeframes = ["5m","15m","1h","4h"]
+    symbols = get_top_80_kucoin_symbols()
+    if not symbols:
+        logging.error("❌ هیچ نمادی دریافت نشد.")
+        return
+
     while True:
-        try:
-            for symbol in symbols:
-                side, tf_sigs = check_multi_timeframes(symbol)
-                if side:
-                    # ساخت پیام با اطلاعات کامل
-                    msg_lines = []
-                    msg_lines.append(f"🔔 **سیگنال {side}** برای {symbol}")
-                    for tf, s in tf_sigs.items():
-                        msg_lines.append(f"    تایم‌فریم {tf}: {s if s else 'No Signal'}")
-                    msg = "\n".join(msg_lines)
-                    bot.send_message(chat_id=CHAT_ID, text=msg)
-                    logging.info(msg)
-            time.sleep(60 * 5)
-        except Exception as e:
-            logging.error(f"❌ خطا: {e}")
-            time.sleep(60)
+        for symbol in symbols:
+            try:
+                final_signal, frame_msgs = generate_multiframe_signal(symbol, timeframes)
+                if final_signal:
+                    logging.info(final_signal)
+                    try:
+                        bot.send_message(chat_id=CHAT_ID, text=final_signal)
+                    except Exception as e:
+                        logging.error(f"[Telegram Error] {e}")
+                # ارسال پیام‌های تک‌تایم‌فریم در صورت نیاز (غیر ضروری)
+                # for msg in frame_msgs:
+                #     if msg:
+                #         bot.send_message(chat_id=CHAT_ID, text=msg)
+                time.sleep(1)  # فاصله بین نمادها
+            except Exception as e:
+                logging.error(f"❌ خطا در پردازش {symbol}: {e}")
+        time.sleep(60*5)  # هر 5 دقیقه کل 80 ارز چک می‌شوند
 
 if __name__ == "__main__":
     main()
