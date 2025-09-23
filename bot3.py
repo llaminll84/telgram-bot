@@ -19,8 +19,25 @@ bot.send_message(chat_id=CHAT_ID, text="✅ ربات استارت شد و به �
 # ─── تنظیمات لاگینگ ───
 logging.basicConfig(level=logging.INFO)
 
-# ─── اتصال به صرافی ───
-exchange = ccxt.binance({"enableRateLimit": True})
+# ─── تنظیم تایم‌فریم‌ها ───
+TIMEFRAMES = ["5m", "15m", "1h", "4h"]   # می‌تونی این لیست رو تغییر بدی
+CONFIRMATION_NEEDED = 2   # حداقل چند تایم‌فریم باید هم‌نظر باشن تا سیگنال بده
+
+# ─── اتصال به صرافی کوکوین ───
+exchange = ccxt.kucoin({"enableRateLimit": True})
+
+# ─── گرفتن ۸۰ ارز برتر بر اساس حجم معاملات ۲۴ ساعته ───
+def get_top_symbols(limit=80):
+    markets = exchange.load_markets()
+    tickers = exchange.fetch_tickers()
+    data = []
+    for symbol, ticker in tickers.items():
+        if "/USDT" in symbol:  # فقط جفت‌های USDT
+            volume = ticker.get("quoteVolume", 0)
+            data.append((symbol, volume))
+    data = sorted(data, key=lambda x: x[1], reverse=True)
+    top_symbols = [s[0] for s in data[:limit]]
+    return top_symbols
 
 # ─── محاسبه ایچیموکو ───
 def ichimoku(df):
@@ -247,20 +264,48 @@ def generate_signal(df, symbol=None):
     message = "\n".join(lines)
     return message
 
+# ─── تابع بررسی چند تایم‌فریم برای هر نماد ───
+def check_multi_timeframes(symbol):
+    # لیستی از سیگنال‌ها برای هر تایم‌فریم
+    tf_signals = {}
+    for tf in TIMEFRAMES:
+        try:
+            df_tf = fetch_ohlcv(symbol=symbol, timeframe=tf, limit=200)
+            sig = None
+            if df_tf is not None:
+                sig = generate_signal(df_tf, symbol=f"{symbol} ({tf})")
+            tf_signals[tf] = sig
+        except Exception as e:
+            logging.error(f"❌ خطا در {symbol} تایم‌فریم {tf}: {e}")
+            tf_signals[tf] = None
+
+    # محاسبه تعداد BUY / SELL در تایم‌فریم‌ها
+    buy_count = sum(1 for sig in tf_signals.values() if sig is not None and "BUY" in sig)
+    sell_count = sum(1 for sig in tf_signals.values() if sig is not None and "SELL" in sig)
+
+    if buy_count >= CONFIRMATION_NEEDED:
+        return "BUY", tf_signals
+    elif sell_count >= CONFIRMATION_NEEDED:
+        return "SELL", tf_signals
+    else:
+        return None, tf_signals
+
 # ─── حلقه اصلی ───
 def main():
-    symbol = "BTC/USDT"
-    timeframe = "1h"
+    symbols = get_top_symbols(limit=80)
     while True:
         try:
-            df = fetch_ohlcv(symbol, timeframe)
-            signal_text = generate_signal(df, symbol=symbol)
-            if signal_text:
-                logging.info(signal_text)
-                try:
-                    bot.send_message(chat_id=CHAT_ID, text=signal_text)
-                except Exception as e:
-                    logging.error(f"[Telegram Error] {e}")
+            for symbol in symbols:
+                side, tf_sigs = check_multi_timeframes(symbol)
+                if side:
+                    # ساخت پیام با اطلاعات کامل
+                    msg_lines = []
+                    msg_lines.append(f"🔔 **سیگنال {side}** برای {symbol}")
+                    for tf, s in tf_sigs.items():
+                        msg_lines.append(f"    تایم‌فریم {tf}: {s if s else 'No Signal'}")
+                    msg = "\n".join(msg_lines)
+                    bot.send_message(chat_id=CHAT_ID, text=msg)
+                    logging.info(msg)
             time.sleep(60 * 5)
         except Exception as e:
             logging.error(f"❌ خطا: {e}")
