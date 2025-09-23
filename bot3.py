@@ -329,7 +329,6 @@ def main():
 final_signal += "\n\n".join(
     f"[{tf}]\n{sig}" for tf, sig in signals if "نوع سیگنال: BUY" in sig
 )
-"
                            final_signal += "\n\n".join(
     f"[{tf}]\n{sig}" for tf, sig in signals if "نوع سیگنال: SELL" in sig
 )
