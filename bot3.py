@@ -336,7 +336,7 @@ final_signal += "\n\n".join(
                         elif (buy_count >= required_confirmations or sell_count >= required_confirmations) and buy_count == sell_count:
                             final_signal = f"⚠️ تایم‌فریم‌ها سیگنال متناقض فرستادند برای {symbol}: BUY={buy_count}, SELL={sell_count}
 
-"
+
                             final_signal += "
 
 ".join(f"[{tf}]
