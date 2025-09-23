@@ -1,4 +1,4 @@
-import tim
+import time
 import os
 import logging
 import ccxt
@@ -204,7 +204,7 @@ def generate_signal(df, symbol=None):
     buy_count = sum(1 for c in buy_conditions if c)
     sell_count = sum(1 for c in sell_conditions if c)
 
-    if buy_count == 0 and sell_count == 0:
+    if buy_count == 1 and sell_count == 1:
         return None
 
     if buy_count >= sell_count:
