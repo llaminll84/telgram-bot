@@ -325,11 +325,10 @@ def main():
     f"({buy_count}/{len(timeframes)} تایم‌فریم)\n\n"
 )
 
-".join(f"[{tf}]
 final_signal += "\n\n".join(
     f"[{tf}]\n{sig}" for tf, sig in signals if "نوع سیگنال: BUY" in sig
 )
-                           final_signal += "\n\n".join(
+final_signal += "\n\n".join(
     f"[{tf}]\n{sig}" for tf, sig in signals if "نوع سیگنال: SELL" in sig
 )
 
