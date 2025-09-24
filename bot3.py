@@ -1,6 +1,6 @@
 import os
 import tim
-import logging
+import loggin
 import ccxt
 import pandas as pd
 import numpy as np
