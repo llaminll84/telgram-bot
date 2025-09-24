@@ -1,5 +1,6 @@
 # Base image سبک با Python 3.11
 FROM python:3.11.7-slim
+FROM public.ecr.aws/docker/library/python:3.11.7-slim
 
 
 # محیط کاری
