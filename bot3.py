@@ -1,5 +1,5 @@
 import os
-import tim
+import time
 import logging
 import ccxt
 import pandas as pd
@@ -61,21 +61,11 @@ def get_ohlcv(symbol, timeframe="15m", limit=150):
         logging.error(f"⚠️ خطا در دریافت داده {symbol} تایم‌فریم {timeframe}: {e}")
         return None
 
-# ─── اندیکاتورها + فیبوناچی + ATR ───
+# ─── اندیکاتورها + Fibonacci + ATR ───
 def add_indicators(df):
     # MA
     df["MA20"] = df["close"].rolling(20).mean()
-    df["MA50"] = df["close"].rolling(50).mean()
-
-    # EMA
     df["EMA20"] = df["close"].ewm(span=20).mean()
-    df["EMA50"] = df["close"].ewm(span=50).mean()
-
-    # Bollinger Bands
-    df["BB_MID"] = df["close"].rolling(20).mean()
-    df["BB_STD"] = df["close"].rolling(20).std()
-    df["BB_UPPER"] = df["BB_MID"] + 2 * df["BB_STD"]
-    df["BB_LOWER"] = df["BB_MID"] - 2 * df["BB_STD"]
 
     # RSI
     delta = df["close"].diff()
@@ -92,14 +82,6 @@ def add_indicators(df):
     df["MACD"] = ema12 - ema26
     df["Signal"] = df["MACD"].ewm(span=9).mean()
 
-    # Ichimoku (ساده)
-    high9 = df["high"].rolling(9).max()
-    low9 = df["low"].rolling(9).min()
-    df["Tenkan"] = (high9 + low9) / 2
-    high26 = df["high"].rolling(26).max()
-    low26 = df["low"].rolling(26).min()
-    df["Kijun"] = (high26 + low26) / 2
-
     # ATR
     df["H-L"] = df["high"] - df["low"]
     df["H-C"] = abs(df["high"] - df["close"].shift())
@@ -107,66 +89,104 @@ def add_indicators(df):
     df["TR"] = df[["H-L","H-C","L-C"]].max(axis=1)
     df["ATR14"] = df["TR"].rolling(14).mean()
 
-    # فیبوناچی (آخرین 26 کندل)
+    # Fibonacci (آخرین 26 کندل)
     if len(df) >= 26:
         recent = df["close"].iloc[-26:]
         high = recent.max()
         low = recent.min()
         diff = high - low
-        df["Fib23.6"] = high - 0.236 * diff
         df["Fib38.2"] = high - 0.382 * diff
-        df["Fib50"] = high - 0.5 * diff
         df["Fib61.8"] = high - 0.618 * diff
 
     return df
-# ─── تایم‌فریم‌ها ───
-timeframes = ["5m", "15m", "1h", "4h"]
+# ─── تایم‌فریم‌ها برای تأیید ───
+TIMEFRAMES = ["15m", "1h"]  # تایم‌فریم اول و دوم
 
-# ─── تحلیل سیگنال با ترکیب اندیکاتورها + فیبوناچی + ATR ───
-def analyze(df):
-    if df is None or len(df) < 50:
+# ─── بررسی شرط‌های اندیکاتورها برای BUY/SELL ───
+def check_conditions(last):
+    conditions = {"buy": 0, "sell": 0}
+    
+    # شرط‌های BUY
+    if last["close"] > last["MA20"] and last["close"] > last["EMA20"]:
+        conditions["buy"] += 1
+    if last["RSI"] < 70:
+        conditions["buy"] += 1
+    if last["MACD"] > last["Signal"]:
+        conditions["buy"] += 1
+    if last["close"] > last.get("Fib38.2", 0):
+        conditions["buy"] += 1
+
+    # شرط‌های SELL
+    if last["close"] < last["MA20"] and last["close"] < last["EMA20"]:
+        conditions["sell"] += 1
+    if last["RSI"] > 30:
+        conditions["sell"] += 1
+    if last["MACD"] < last["Signal"]:
+        conditions["sell"] += 1
+    if last["close"] < last.get("Fib61.8", 0):
+        conditions["sell"] += 1
+
+    return conditions
+
+# ─── تشخیص واگرایی ساده RSI/MACD ───
+def check_divergence(df):
+    if len(df) < 15:
         return None
-
     last = df.iloc[-1]
-
-    # شرایط ساده برای BUY و SELL (نمونه اولیه، قابل توسعه)
-    buy_cond = (
-        last["close"] > last["MA20"] and
-        last["close"] > last["EMA20"] and
-        last["RSI"] < 70 and
-        last["MACD"] > last["Signal"] and
-        last["close"] > last.get("Fib38.2", 0)  # مثال: بالاتر از فیبو 38.2
-    )
-
-    sell_cond = (
-        last["close"] < last["MA20"] and
-        last["close"] < last["EMA20"] and
-        last["RSI"] > 30 and
-        last["MACD"] < last["Signal"] and
-        last["close"] < last.get("Fib61.8", 0)  # مثال: پایین‌تر از فیبو 61.8
-    )
-
-    if buy_cond:
-        return "BUY"
-    elif sell_cond:
-        return "SELL"
+    prev = df.iloc[-5]
+    
+    # Bullish Divergence
+    if last["close"] < prev["close"] and last["RSI"] > prev["RSI"]:
+        return "Bullish Divergence"
+    # Bearish Divergence
+    if last["close"] > prev["close"] and last["RSI"] < prev["RSI"]:
+        return "Bearish Divergence"
     return None
 
-# ─── تولید سیگنال تایید چند تایم‌فریم ───
+# ─── تحلیل یک تایم‌فریم ───
+def analyze_timeframe(df):
+    last = df.iloc[-1]
+    conditions = check_conditions(last)
+    divergence = check_divergence(df)
+    
+    # حداقل 3 شرط تایید
+    if conditions["buy"] >= 3:
+        return "BUY", last, divergence
+    elif conditions["sell"] >= 3:
+        return "SELL", last, divergence
+    return None, last, divergence
+
+# ─── تولید سیگنال با تأیید حداقل دو تایم‌فریم ───
 def generate_signal(symbol):
-    signals = []
-    for tf in timeframes:
+    results = []
+    lasts = []
+    divergences = []
+
+    for tf in TIMEFRAMES:
         df = get_ohlcv(symbol, tf)
         df = add_indicators(df)
-        sig = analyze(df)
-        if sig:
-            signals.append(sig)
+        sig, last, div = analyze_timeframe(df)
+        results.append(sig)
+        lasts.append(last)
+        divergences.append(div)
 
-    # حداقل ۲ تایم‌فریم هم‌نظر
-    if signals.count("BUY") >= 2:
-        return "BUY"
-    elif signals.count("SELL") >= 2:
-        return "SELL"
+    # حداقل ۲ تایم‌فریم موافق
+    if results.count("BUY") >= 2:
+        entry = lasts[0]["close"]
+        atr = lasts[0]["ATR14"] if "ATR14" in lasts[0] else 0
+        sl = entry - atr * 1.5 if atr > 0 else entry * 0.98
+        tp = entry + atr * 3 if atr > 0 else entry * 1.03
+        div_msg = divergences[0] if divergences[0] else ""
+        return {"signal": "BUY", "entry": entry, "sl": sl, "tp": tp, "divergence": div_msg}
+
+    elif results.count("SELL") >= 2:
+        entry = lasts[0]["close"]
+        atr = lasts[0]["ATR14"] if "ATR14" in lasts[0] else 0
+        sl = entry + atr * 1.5 if atr > 0 else entry * 1.02
+        tp = entry - atr * 3 if atr > 0 else entry * 0.97
+        div_msg = divergences[0] if divergences[0] else ""
+        return {"signal": "SELL", "entry": entry, "sl": sl, "tp": tp, "divergence": div_msg}
+
     return None
 # ─── اجرای ربات ───
 def run_bot():
@@ -176,9 +196,15 @@ def run_bot():
     while True:
         try:
             for symbol in symbols:
-                signal = generate_signal(symbol)
-                if signal:
-                    msg = f"📊 سیگنال {signal} برای {symbol} (تأیید حداقل ۲ تایم‌فریم)"
+                sig = generate_signal(symbol)
+                if sig:
+                    div_text = f"\n⚡ واگرایی: {sig['divergence']}" if sig.get("divergence") else ""
+                    msg = (
+                        f"📊 سیگنال {sig['signal']} برای {symbol}\n"
+                        f"Entry: {sig['entry']:.4f}\n"
+                        f"Stop Loss: {sig['sl']:.4f}\n"
+                        f"Take Profit: {sig['tp']:.4f}{div_text}"
+                    )
                     send_telegram_message(msg)
                     logging.info(msg)
                 time.sleep(2)  # جلوگیری از محدودیت API
@@ -188,5 +214,5 @@ def run_bot():
 
 # ─── اجرای اصلی ───
 if __name__ == "__main__":
-    send_telegram_message("✅ ربات شروع شد (۶۰ ارز + ۴ تایم‌فریم + اندیکاتورها + فیبوناچی + ATR).")
+    send_telegram_message("✅ ربات شروع شد (سیگنال با تایید دو تایم‌فریم، اندیکاتورهای کم‌خطا و واگرایی).")
     run_bot()
