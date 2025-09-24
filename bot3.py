@@ -146,7 +146,7 @@ def generate_signal(df):
 
 # ─── اجرای ربات ───
 def run_bot():
-    while True:
+    while Tru
         symbols = get_top_symbols(limit=80)
         logging.info(f"🔝 ارزهای انتخاب‌شده: {symbols[:10]} ...")
 
