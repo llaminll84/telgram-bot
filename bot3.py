@@ -33,7 +33,7 @@ exchange = ccxt.kucoin({
 })
 
 # ─── تنظیمات ترید ───
-symbols = ["BTC/USDT", "ETH/USDT", "BNB/USDT"]  # می‌تونی ارزها رو تغییر بدی
+symbols = ["BTC/USDT", "ETH/USDT", "BNB/USDT"]
 timeframe = "15m"
 limit = 200
 rsi_period = 14
@@ -53,6 +53,7 @@ def fetch_ohlcv(symbol, timeframe, limit=200):
 # ─── محاسبه اندیکاتورها ───
 def calculate_indicators(df):
     df["MA"] = df["close"].rolling(ma_period).mean()
+
     delta = df["close"].diff()
     gain = delta.where(delta > 0, 0)
     loss = -delta.where(delta < 0, 0)
@@ -60,19 +61,23 @@ def calculate_indicators(df):
     avg_loss = loss.rolling(rsi_period).mean()
     rs = avg_gain / avg_loss
     df["RSI"] = 100 - (100 / (1 + rs))
+
     return df
 
 # ─── سیگنال خرید/فروش ───
 def generate_signal(df):
     if df is None or len(df) < ma_period:
         return None
+
     last_row = df.iloc[-1]
-    signal = None
-    if last_row["RSI"] < 30 and last_row["close"] > last_row["MA"]:
-        signal = "BUY"
-    elif last_row["RSI"] > 70 and last_row["close"] < last_row["MA"]:
-        signal = "SELL"
-    return signal
+    prev_row = df.iloc[-2]
+
+    # شرط: سیگنال فقط وقتی داده بشه که تغییر واقعی باشه
+    if last_row["RSI"] < 30 and last_row["close"] > last_row["MA"] and prev_row["RSI"] >= 30:
+        return "BUY"
+    elif last_row["RSI"] > 70 and last_row["close"] < last_row["MA"] and prev_row["RSI"] <= 70:
+        return "SELL"
+    return None
 # ─── ارسال پیام به تلگرام ───
 def send_telegram_message(message):
     try:
@@ -83,6 +88,8 @@ def send_telegram_message(message):
 
 # ─── اجرای استراتژی ───
 def run_bot():
+    last_signal = {}  # ذخیره آخرین سیگنال هر ارز برای جلوگیری از تکرار
+
     while True:
         try:
             for symbol in symbols:
@@ -90,16 +97,22 @@ def run_bot():
                 if df is not None:
                     df = calculate_indicators(df)
                     signal = generate_signal(df)
-                    if signal:
-                        msg = f"📊 سیگنال {signal} برای {symbol}\nقیمت: {df['close'].iloc[-1]:.2f}"
+
+                    if signal and last_signal.get(symbol) != signal:
+                        price = df["close"].iloc[-1]
+                        msg = f"📊 سیگنال {signal} برای {symbol}\nقیمت: {price:.2f}"
                         send_telegram_message(msg)
+                        last_signal[symbol] = signal
                         logging.info(msg)
+
                 time.sleep(2)  # جلوگیری از محدودیت API
+
         except Exception as e:
             logging.error(f"⚠️ خطای کلی در اجرای ربات: {e}")
+
         time.sleep(60)  # هر ۱ دقیقه اجرا شود
 
 # ─── اجرای اصلی ───
 if __name__ == "__main__":
-    send_telegram_message("✅ ربات ترید شروع به کار کرد.")
+    send_telegram_message("✅ ربات ترید شروع به کار کرد (نسخه اصلاحی).")
     run_bot()
