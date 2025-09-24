@@ -1,7 +1,7 @@
 import os
 import tim
 import logging
-import ccxt
+import ccx
 import pandas as pd
 import numpy as np
 from telegram import Bot
