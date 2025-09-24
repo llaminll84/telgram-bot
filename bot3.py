@@ -1,218 +1,199 @@
+import time
 import os
-import tim
 import logging
 import ccxt
 import pandas as pd
 import numpy as np
 from telegram import Bot
-from keep_alive import keep_alive
+from ta.trend import EMAIndicator, SMAIndicator, MACD
+from ta.momentum import RSIIndicator
+from ta.volatility import BollingerBands, AverageTrueRange
 
-# ─── فعال کردن سرور کوچک ───
-keep_alive()
+# ─── فعال کردن لاگ ───
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # ─── اطلاعات ربات تلگرام ───
 TELEGRAM_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 bot = Bot(token=TELEGRAM_TOKEN)
 
-# ─── تنظیمات لاگ ───
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler()]
-)
+# ─── تنظیمات صرافی ───
+exchange = ccxt.kucoin()
 
-# ─── اتصال به صرافی ───
-API_KEY = os.getenv("API_KEY")
-API_SECRET = os.getenv("API_SECRET")
-
-exchange = ccxt.kucoin({
-    "apiKey": API_KEY,
-    "secret": API_SECRET,
-    "enableRateLimit": True
-})
-
-# ─── ارسال پیام به تلگرام ───
-def send_telegram_message(message):
-    try:
-        bot.send_message(chat_id=CHAT_ID, text=message)
-        logging.info(f"📩 پیام ارسال شد: {message}")
-    except Exception as e:
-        logging.error(f"❌ خطا در ارسال پیام تلگرام: {e}")
-
-# ─── گرفتن ۶۰ ارز برتر بر اساس حجم ۲۴ ساعته ───
+# ─── گرفتن 60 ارز برتر بر اساس حجم 24 ساعته ───
 def get_top_symbols(limit=60):
     tickers = exchange.fetch_tickers()
-    df = pd.DataFrame([
-        {"symbol": sym, "volume": t["quoteVolume"]}
-        for sym, t in tickers.items() if "/USDT" in sym
-    ])
-    df = df.sort_values("volume", ascending=False).head(limit)
-    return df["symbol"].tolist()
+    sorted_pairs = sorted(tickers.items(), key=lambda x: x[1]['quoteVolume'], reverse=True)
+    usdt_pairs = [s for s, data in sorted_pairs if s.endswith("/USDT")]
+    return usdt_pairs[:limit]
 
-# ─── گرفتن داده کندل ───
-def get_ohlcv(symbol, timeframe="15m", limit=150):
-    try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
-        df = pd.DataFrame(ohlcv, columns=["time", "open", "high", "low", "close", "volume"])
-        df["time"] = pd.to_datetime(df["time"], unit="ms")
-        return df
-    except Exception as e:
-        logging.error(f"⚠️ خطا در دریافت داده {symbol} تایم‌فریم {timeframe}: {e}")
-        return None
-
-# ─── اندیکاتورها + Fibonacci + ATR ───
+# ─── گرفتن کندل‌ها ───
+def get_ohlcv(symbol, timeframe="5m", limit=100):
+    data = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+    df = pd.DataFrame(data, columns=["time", "open", "high", "low", "close", "volume"])
+    df["time"] = pd.to_datetime(df["time"], unit="ms")
+    return df
+# ─── محاسبه اندیکاتورها ───
 def add_indicators(df):
-    # MA
-    df["MA20"] = df["close"].rolling(20).mean()
-    df["EMA20"] = df["close"].ewm(span=20).mean()
+    df["EMA20"] = EMAIndicator(df["close"], window=20).ema_indicator()
+    df["MA20"] = SMAIndicator(df["close"], window=20).sma_indicator()
+    df["RSI"] = RSIIndicator(df["close"], window=14).rsi()
 
-    # RSI
-    delta = df["close"].diff()
-    gain = np.where(delta > 0, delta, 0)
-    loss = np.where(delta < 0, -delta, 0)
-    avg_gain = pd.Series(gain).rolling(14).mean()
-    avg_loss = pd.Series(loss).rolling(14).mean()
-    rs = avg_gain / avg_loss
-    df["RSI"] = 100 - (100 / (1 + rs))
+    macd = MACD(df["close"])
+    df["MACD"] = macd.macd()
+    df["Signal"] = macd.macd_signal()
 
-    # MACD
-    ema12 = df["close"].ewm(span=12).mean()
-    ema26 = df["close"].ewm(span=26).mean()
-    df["MACD"] = ema12 - ema26
-    df["Signal"] = df["MACD"].ewm(span=9).mean()
+    atr = AverageTrueRange(df["high"], df["low"], df["close"], window=14)
+    df["ATR"] = atr.average_true_range()
 
-    # ATR
-    df["H-L"] = df["high"] - df["low"]
-    df["H-C"] = abs(df["high"] - df["close"].shift())
-    df["L-C"] = abs(df["low"] - df["close"].shift())
-    df["TR"] = df[["H-L","H-C","L-C"]].max(axis=1)
-    df["ATR14"] = df["TR"].rolling(14).mean()
-
-    # Fibonacci (آخرین 26 کندل)
-    if len(df) >= 26:
-        recent = df["close"].iloc[-26:]
-        high = recent.max()
-        low = recent.min()
-        diff = high - low
-        df["Fib38.2"] = high - 0.382 * diff
-        df["Fib61.8"] = high - 0.618 * diff
+    # محاسبه سطوح فیبوناچی
+    high, low = df["high"].max(), df["low"].min()
+    df["Fib38.2"] = high - (high - low) * 0.382
+    df["Fib61.8"] = high - (high - low) * 0.618
 
     return df
-# ─── تایم‌فریم‌ها برای تأیید ───
-TIMEFRAMES = ["15m", "1h"]  # تایم‌فریم اول و دوم
 
-# ─── بررسی شرط‌های اندیکاتورها برای BUY/SELL ───
-def check_conditions(last):
+
+# ─── تشخیص الگوهای کندلی ───
+def detect_candlestick_patterns(df):
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+
+    pattern = None
+
+    # Doji
+    if abs(last["close"] - last["open"]) <= (last["high"] - last["low"]) * 0.1:
+        pattern = "Doji"
+
+    # Hammer
+    elif (last["close"] > last["open"]) and ((last["close"] - last["low"]) > 2 * (last["high"] - last["close"])):
+        pattern = "Hammer"
+
+    # Shooting Star
+    elif (last["open"] > last["close"]) and ((last["high"] - last["close"]) > 2 * (last["close"] - last["low"])):
+        pattern = "Shooting Star"
+
+    # Bullish Engulfing
+    elif (last["close"] > last["open"]) and (prev["close"] < prev["open"]) \
+         and (last["close"] > prev["open"]) and (last["open"] < prev["close"]):
+        pattern = "Bullish Engulfing"
+
+    # Bearish Engulfing
+    elif (last["close"] < last["open"]) and (prev["close"] > prev["open"]) \
+         and (last["open"] > prev["close"]) and (last["close"] < prev["open"]):
+        pattern = "Bearish Engulfing"
+
+    return pattern
+
+
+# ─── بررسی شرایط سخت‌تر ───
+def check_strict_conditions(last):
     conditions = {"buy": 0, "sell": 0}
-    
-    # شرط‌های BUY
-    if last["close"] > last["MA20"] and last["close"] > last["EMA20"]:
-        conditions["buy"] += 1
-    if last["RSI"] < 70:
-        conditions["buy"] += 1
-    if last["MACD"] > last["Signal"]:
-        conditions["buy"] += 1
-    if last["close"] > last.get("Fib38.2", 0):
-        conditions["buy"] += 1
 
-    # شرط‌های SELL
-    if last["close"] < last["MA20"] and last["close"] < last["EMA20"]:
+    # MA/EMA
+    if last["close"] > last["MA20"] * 1.01 and last["close"] > last["EMA20"] * 1.01:
+        conditions["buy"] += 1
+    if last["close"] < last["MA20"] * 0.99 and last["close"] < last["EMA20"] * 0.99:
         conditions["sell"] += 1
-    if last["RSI"] > 30:
+
+    # RSI
+    if last["RSI"] < 60:
+        conditions["buy"] += 1
+    if last["RSI"] > 40:
         conditions["sell"] += 1
-    if last["MACD"] < last["Signal"]:
+
+    # MACD
+    if last["MACD"] - last["Signal"] > 0.0001:
+        conditions["buy"] += 1
+    if last["MACD"] - last["Signal"] < -0.0001:
         conditions["sell"] += 1
-    if last["close"] < last.get("Fib61.8", 0):
+
+    # Fibonacci
+    if last["close"] > last["Fib38.2"]:
+        conditions["buy"] += 1
+    if last["close"] < last["Fib61.8"]:
         conditions["sell"] += 1
 
     return conditions
+# ─── ارسال پیام به تلگرام ───
+def send_telegram_message(msg):
+    try:
+        bot.send_message(chat_id=CHAT_ID, text=msg)
+    except Exception as e:
+        logging.error(f"❌ خطا در ارسال پیام تلگرام: {e}")
 
-# ─── تشخیص واگرایی ساده RSI/MACD ───
-def check_divergence(df):
-    if len(df) < 15:
-        return None
-    last = df.iloc[-1]
-    prev = df.iloc[-5]
-    
-    # Bullish Divergence
-    if last["close"] < prev["close"] and last["RSI"] > prev["RSI"]:
-        return "Bullish Divergence"
-    # Bearish Divergence
-    if last["close"] > prev["close"] and last["RSI"] < prev["RSI"]:
-        return "Bearish Divergence"
-    return None
 
-# ─── تحلیل یک تایم‌فریم ───
-def analyze_timeframe(df):
-    last = df.iloc[-1]
-    conditions = check_conditions(last)
-    divergence = check_divergence(df)
-    
-    # حداقل 3 شرط تایید
-    if conditions["buy"] >= 3:
-        return "BUY", last, divergence
-    elif conditions["sell"] >= 3:
-        return "SELL", last, divergence
-    return None, last, divergence
-
-# ─── تولید سیگنال با تأیید حداقل دو تایم‌فریم ───
+# ─── تولید سیگنال ───
 def generate_signal(symbol):
-    results = []
-    lasts = []
-    divergences = []
-
-    for tf in TIMEFRAMES:
-        df = get_ohlcv(symbol, tf)
+    try:
+        df = get_ohlcv(symbol, timeframe="5m", limit=100)
         df = add_indicators(df)
-        sig, last, div = analyze_timeframe(df)
-        results.append(sig)
-        lasts.append(last)
-        divergences.append(div)
+        last = df.iloc[-1]
 
-    # حداقل ۲ تایم‌فریم موافق
-    if results.count("BUY") >= 2:
-        entry = lasts[0]["close"]
-        atr = lasts[0]["ATR14"] if "ATR14" in lasts[0] else 0
-        sl = entry - atr * 1.5 if atr > 0 else entry * 0.98
-        tp = entry + atr * 3 if atr > 0 else entry * 1.03
-        div_msg = divergences[0] if divergences[0] else ""
-        return {"signal": "BUY", "entry": entry, "sl": sl, "tp": tp, "divergence": div_msg}
+        conditions = check_strict_conditions(last)
+        pattern = detect_candlestick_patterns(df)
 
-    elif results.count("SELL") >= 2:
-        entry = lasts[0]["close"]
-        atr = lasts[0]["ATR14"] if "ATR14" in lasts[0] else 0
-        sl = entry + atr * 1.5 if atr > 0 else entry * 1.02
-        tp = entry - atr * 3 if atr > 0 else entry * 0.97
-        div_msg = divergences[0] if divergences[0] else ""
-        return {"signal": "SELL", "entry": entry, "sl": sl, "tp": tp, "divergence": div_msg}
+        # حداقل 2 شرط لازم برای سیگنال
+        if conditions["buy"] >= 2:
+            entry = last["close"]
+            sl = entry - last["ATR"] * 2
+            tp = entry + last["ATR"] * 3
+            return {
+                "symbol": symbol,
+                "signal": "BUY",
+                "entry": entry,
+                "sl": sl,
+                "tp": tp,
+                "pattern": pattern
+            }
 
-    return None
+        elif conditions["sell"] >= 2:
+            entry = last["close"]
+            sl = entry + last["ATR"] * 2
+            tp = entry - last["ATR"] * 3
+            return {
+                "symbol": symbol,
+                "signal": "SELL",
+                "entry": entry,
+                "sl": sl,
+                "tp": tp,
+                "pattern": pattern
+            }
+
+        return None
+
+    except Exception as e:
+        logging.error(f"⚠️ خطا در generate_signal برای {symbol}: {e}")
+        return None
+
+
 # ─── اجرای ربات ───
 def run_bot():
-    symbols = get_top_symbols()
-    logging.info(f"🔝 ارزهای انتخاب‌شده: {symbols[:10]} ...")
-
     while True:
-        try:
-            for symbol in symbols:
-                sig = generate_signal(symbol)
-                if sig:
-                    div_text = f"\n⚡ واگرایی: {sig['divergence']}" if sig.get("divergence") else ""
-                    msg = (
-                        f"📊 سیگنال {sig['signal']} برای {symbol}\n"
-                        f"Entry: {sig['entry']:.4f}\n"
-                        f"Stop Loss: {sig['sl']:.4f}\n"
-                        f"Take Profit: {sig['tp']:.4f}{div_text}"
-                    )
-                    send_telegram_message(msg)
-                    logging.info(msg)
-                time.sleep(2)  # جلوگیری از محدودیت API
-        except Exception as e:
-            logging.error(f"⚠️ خطای کلی در اجرای ربات: {e}")
-        time.sleep(60)  # بررسی هر ۶۰ ثانیه
+        symbols = get_top_symbols(limit=60)
+        logging.info(f"🔝 ارزهای انتخاب‌شده: {symbols[:10]} ...")
+
+        for symbol in symbols:
+            sig = generate_signal(symbol)
+            if sig:
+                msg = (
+                    f"📊 سیگنال {sig['signal']} برای {sig['symbol']}\n"
+                    f"Entry: {sig['entry']:.4f}\n"
+                    f"Stop Loss: {sig['sl']:.4f}\n"
+                    f"Take Profit: {sig['tp']:.4f}"
+                )
+                if sig["pattern"]:
+                    msg += f"\n📌 الگوی کندلی: {sig['pattern']}"
+
+                send_telegram_message(msg)
+                logging.info(msg)
+
+            time.sleep(10)  # فاصله بین درخواست هر ارز
+
+        time.sleep(300)  # بررسی دوباره هر 5 دقیقه
+
 
 # ─── اجرای اصلی ───
 if __name__ == "__main__":
-    send_telegram_message("✅ ربات شروع شد (سیگنال با تایید دو تایم‌فریم، اندیکاتورهای کم‌خطا و واگرایی).")
+    send_telegram_message("✅ ربات شروع شد (اندیکاتورها + کندل‌استیک‌ها + بررسی هر 5 دقیقه).")
     run_bot()
