@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 from ta.trend import EMAIndicator, MACD
 from ta.momentum import RSIIndicator
+from telegram import Bot
 
 # ─── تنظیمات لاگ ───
 logging.basicConfig(
@@ -16,12 +17,23 @@ logging.basicConfig(
 # ─── اتصال به کوکوین ───
 exchange = ccxt.kucoin()
 
+# ─── تنظیمات تلگرام ───
+TELEGRAM_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+bot = Bot(token=TELEGRAM_TOKEN)
+
+def send_telegram(msg):
+    try:
+        bot.send_message(chat_id=CHAT_ID, text=msg)
+    except Exception as e:
+        logging.error(f"❌ خطا در ارسال تلگرام: {e}")
+
 # ─── گرفتن 80 ارز برتر بر اساس حجم 24 ساعته ───
 def get_top_symbols(limit=80):
     markets = exchange.load_markets()
     symbols = sorted(
         markets.values(),
-        key=lambda x: x['quoteVolume'],
+        key=lambda x: x.get('quoteVolume', 0),
         reverse=True
     )[:limit]
     return [s['symbol'] for s in symbols if '/USDT' in s['symbol']]
@@ -56,9 +68,10 @@ def detect_candlestick(df):
     # Hammer
     elif (last['close'] > last['open']) and ((last['close'] - last['low']) > 2*(last['high'] - last['close'])):
         pattern = "Hammer"
-    # Engulfing
+    # Bullish Engulfing
     elif (last['close'] > last['open']) and (prev['close'] < prev['open']) and (last['close'] > prev['open']) and (last['open'] < prev['close']):
         pattern = "Bullish Engulfing"
+    # Bearish Engulfing
     elif (last['close'] < last['open']) and (prev['close'] > prev['open']) and (last['open'] > prev['close']) and (last['close'] < prev['open']):
         pattern = "Bearish Engulfing"
 
@@ -92,22 +105,11 @@ def detect_trendline(prices, window=5, tol=0.01):
             trend_info["signal"] = "BUY (نزدیک حمایت)"
 
     return trend_info
-from telegram import Bot
-TELEGRAM_TOKEN = os.getenv("BOT_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
-bot = Bot(token=TELEGRAM_TOKEN)
-
-def send_telegram(msg):
-    try:
-        bot.send_message(chat_id=CHAT_ID, text=msg)
-    except Exception as e:
-        logging.error(f"❌ خطا در ارسال تلگرام: {e}")
-
 def generate_signal(df):
     last = df.iloc[-1]
     signals = []
 
-    # شرط های ساده
+    # شرط‌های ساده
     if last['RSI'] < 30:
         signals.append("BUY")
     if last['RSI'] > 70:
@@ -125,7 +127,7 @@ def generate_signal(df):
     pattern = detect_candlestick(df)
     if pattern in ["Hammer","Bullish Engulfing"]:
         signals.append("BUY")
-    if pattern in ["Shooting Star","Bearish Engulfing"]:
+    if pattern in ["Bearish Engulfing"]:
         signals.append("SELL")
 
     # خط روند
@@ -170,11 +172,13 @@ def run_bot():
                 send_telegram(msg)
                 logging.info(msg)
 
-            time.sleep(3)  # فاصله بین هر ارز
+            time.sleep(3)  # فاصله بین بررسی هر ارز
 
         logging.info("⏱️ انتظار 5 دقیقه قبل از بررسی دوباره")
         time.sleep(300)  # بررسی دوباره همه ارزها هر 5 دقیقه
 
+# ─── شروع ربات ───
 if __name__ == "__main__":
-    send_telegram("✅ ربات شروع شد (80 ارز، اندیکاتور + کندل + خط روند)")
+    send_telegram("✅ ربات فعال شد و شروع به کار می‌کند (80 ارز، هر 5 دقیقه بررسی)")
+    logging.info("✅ ربات فعال شد و شروع به کار می‌کند.")
     run_bot()
