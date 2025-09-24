@@ -1,12 +1,13 @@
 import time
 import os
+import logging
 import ccxt
 import pandas as pd
 import numpy as np
 from telegram import Bot
 from keep_alive import keep_alive
 
-# ─── فعال کردن سرور کوچک برای جلوگیری از خوابیدن کانتینر ───
+# ─── فعال کردن سرور کوچک ───
 keep_alive()
 
 # ─── اطلاعات ربات تلگرام ───
@@ -14,303 +15,91 @@ TELEGRAM_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 bot = Bot(token=TELEGRAM_TOKEN)
 
-# ─── پیام تست برای اطمینان از اتصال ───
-bot.send_message(chat_id=CHAT_ID, text="✅ ربات با موفقیت راه‌اندازی شد!")
+# ─── تنظیمات لاگ ───
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler()]
+)
 
-# ─── صرافی کوکوین ───
-exchange = ccxt.kucoin()
-TOP_N = 50
-TIMEFRAMES = ['5m', '15m', '1h']
+# ─── اتصال به صرافی ───
+api_key = os.getenv("API_KEY")
+api_secret = os.getenv("API_SECRET")
 
-# گرفتن نمادهای برتر
-def get_top_symbols():
-    tickers = exchange.fetch_tickers()
-    symbols = []
-    for symbol, data in tickers.items():
-        if symbol.endswith('/USDT'):
-            symbols.append({
-                'symbol': symbol,
-                'volume': data['quoteVolume'],
-                'change': data['percentage']
-            })
-    symbols.sort(key=lambda x: x['volume'], reverse=True)
-    return symbols[:TOP_N]
+exchange = ccxt.kucoin({
+    "apiKey": api_key,
+    "secret": api_secret,
+    "enableRateLimit": True
+})
 
-# گرفتن دیتای OHLCV
-def get_ohlcv_df(symbol, timeframe):
-    ohlcv = exchange.fetch_ohlcv(symbol, timeframe)
-    df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-    return df
+# ─── تنظیمات ترید ───
+symbols = ["BTC/USDT", "ETH/USDT", "BNB/USDT"]  # می‌تونی ارزها رو تغییر بدی
+timeframe = "15m"
+limit = 200
+rsi_period = 14
+ma_period = 20
 
-# محاسبه اندیکاتورها + فیبوناچی
-# محاسبه اندیکاتورها (همه ابزارها فعال ولی نمایش داده نمی‌شوند)
+# ─── گرفتن دیتا ───
+def fetch_ohlcv(symbol, timeframe, limit=200):
+    try:
+        data = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        df = pd.DataFrame(data, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+        return df
+    except Exception as e:
+        logging.error(f"❌ خطا در دریافت دیتا {symbol}: {e}")
+        return None
+
+# ─── محاسبه اندیکاتورها ───
 def calculate_indicators(df):
-    # EMA
-    df['EMA9'] = df['close'].ewm(span=9, adjust=False).mean()
-    df['EMA21'] = df['close'].ewm(span=21, adjust=False).mean()
-
-    # Bollinger Bands
-    df['BB_Mid'] = df['close'].rolling(20).mean()
-    df['BB_Std'] = df['close'].rolling(20).std()
-    df['BB_Upper'] = df['BB_Mid'] + 2 * df['BB_Std']
-    df['BB_Lower'] = df['BB_Mid'] - 2 * df['BB_Std']
-
-    # ATR
-    df['H-L'] = df['high'] - df['low']
-    df['H-PC'] = abs(df['high'] - df['close'].shift())
-    df['L-PC'] = abs(df['low'] - df['close'].shift())
-    df['TR'] = df[['H-L', 'H-PC', 'L-PC']].max(axis=1)
-    df['ATR'] = df['TR'].rolling(14).mean()
-
-    # Stochastic RSI
-    rsi_up = df['close'].diff().apply(lambda x: max(x, 0)).rolling(14).mean()
-    rsi_down = df['close'].diff().abs().rolling(14).mean()
-    df['RSI'] = rsi_up / rsi_down
-    df['StochRSI'] = (df['RSI'] - df['RSI'].rolling(14).min()) / (
-        df['RSI'].rolling(14).max() - df['RSI'].rolling(14).min()
-    )
-
-    # Ichimoku Cloud
-    df['Tenkan'] = (df['high'].rolling(9).max() + df['low'].rolling(9).min()) / 2
-    df['Kijun'] = (df['high'].rolling(26).max() + df['low'].rolling(26).min()) / 2
-    df['SenkouA'] = ((df['Tenkan'] + df['Kijun']) / 2).shift(26)
-    df['SenkouB'] = ((df['high'].rolling(52).max() + df['low'].rolling(52).min()) / 2).shift(26)
-
-    # سطوح فیبوناچی (High/Low آخر 50 کندل)
-    recent = df.tail(50)
-    high_price = recent['high'].max()
-    low_price = recent['low'].min()
-    diff = high_price - low_price
-    for level, name in zip([0.236, 0.382, 0.5, 0.618, 0.786], ['Fib23', 'Fib38', 'Fib50', 'Fib61', 'Fib78']):
-        df[name] = high_price - diff * level
-
-    # Order Blocks ساده (۵ کندل اخیر)
-    df['OB_High'] = df['high'].rolling(5).max()
-    df['OB_Low'] = df['low'].rolling(5).min()
-
-    # حمایت/مقاومت ساده با Swing High/Low
-    df['SwingHigh'] = df['high'][df['high'] == df['high'].rolling(5, center=True).max()]
-    df['SwingLow'] = df['low'][df['low'] == df['low'].rolling(5, center=True).min()]
-
-    # --- سطوح فیبوناچی اصلاحی ---
-    if len(df) >= 50:
-        recent_high = df['high'].iloc[-50:].max()
-        recent_low = df['low'].iloc[-50:].min()
-        diff = recent_high - recent_low
-        df['Fib_0'] = recent_high
-        df['Fib_236'] = recent_high - 0.236 * diff
-        df['Fib_382'] = recent_high - 0.382 * diff
-        df['Fib_5'] = recent_high - 0.5 * diff
-        df['Fib_618'] = recent_high - 0.618 * diff
-        df['Fib_786'] = recent_high - 0.786 * diff
-        df['Fib_1'] = recent_low
+    df["MA"] = df["close"].rolling(ma_period).mean()
+    delta = df["close"].diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(rsi_period).mean()
+    avg_loss = loss.rolling(rsi_period).mean()
+    rs = avg_gain / avg_loss
+    df["RSI"] = 100 - (100 / (1 + rs))
     return df
 
-# واگرایی RSI
-def detect_rsi_divergence(df):
-    if len(df) < 10:
+# ─── سیگنال خرید/فروش ───
+def generate_signal(df):
+    if df is None or len(df) < ma_period:
         return None
-    rsi = df['RSI']
-    close = df['close']
+    last_row = df.iloc[-1]
+    signal = None
+    if last_row["RSI"] < 30 and last_row["close"] > last_row["MA"]:
+        signal = "BUY"
+    elif last_row["RSI"] > 70 and last_row["close"] < last_row["MA"]:
+        signal = "SELL"
+    return signal
+# ─── ارسال پیام به تلگرام ───
+def send_telegram_message(message):
+    try:
+        bot.send_message(chat_id=CHAT_ID, text=message)
+        logging.info(f"📩 پیام ارسال شد: {message}")
+    except Exception as e:
+        logging.error(f"❌ خطا در ارسال پیام تلگرام: {e}")
 
-    last_rsi_highs = rsi.tail(5).nlargest(2)
-    last_price_highs = close.loc[last_rsi_highs.index]
-
-    last_rsi_lows = rsi.tail(5).nsmallest(2)
-    last_price_lows = close.loc[last_rsi_lows.index]
-
-    bullish = last_price_lows.iloc[-1] < last_price_lows.iloc[0] and last_rsi_lows.iloc[-1] > last_rsi_lows.iloc[0]
-    bearish = last_price_highs.iloc[-1] > last_price_highs.iloc[0] and last_rsi_highs.iloc[-1] < last_rsi_highs.iloc[0]
-
-    if bullish:
-        return 'bullish'
-    elif bearish:
-        return 'bearish'
-    return None
-# الگوهای شمعی
-def detect_candlestick_patterns(df):
-    patterns = []
-    open_, close, high, low = df['open'].iloc[-1], df['close'].iloc[-1], df['high'].iloc[-1], df['low'].iloc[-1]
-    prev_open, prev_close = df['open'].iloc[-2], df['close'].iloc[-2]
-
-    if prev_close < prev_open and close > open_ and close > prev_open and open_ < prev_close:
-        patterns.append('Bullish Engulfing')
-    if prev_close > prev_open and close < open_ and open_ > prev_close and close < prev_open:
-        patterns.append('Bearish Engulfing')
-    if (close - low) > 2 * (open_ - low):
-        patterns.append('Hammer')
-    if (high - close) > 2 * (high - open_):
-        patterns.append('Hanging Man')
-    return patterns
-
-# تشخیص الگوهای پرچم و مثلث (ووج)
-def detect_pattern_flags(df):
-    flag_patterns = []
-    if len(df) < 10:
-        return flag_patterns
-    recent = df.tail(10)
-    highs = recent['high']
-    lows = recent['low']
-    closes = recent['close']
-
-    # الگوی Flag Up ساده
-    if closes.iloc[-1] > closes.iloc[0] and highs.max() - lows.min() < 0.03 * closes.iloc[0]:
-        flag_patterns.append('Bullish Flag')
-
-    # الگوی Flag Down ساده
-    if closes.iloc[-1] < closes.iloc[0] and highs.max() - lows.min() < 0.03 * closes.iloc[0]:
-        flag_patterns.append('Bearish Flag')
-
-    # الگوی مثلث / ووج (مثلث صعودی یا نزولی)
-    if (highs.max() - highs.min()) < 0.03 * closes.iloc[0] and (lows.max() - lows.min()) < 0.03 * closes.iloc[0]:
-        flag_patterns.append('Triangle / Wedge')
-    return flag_patterns
-
-# ستاپ‌های ساده
-def detect_setups(df):
-    setups = []
-    if df['close'].iloc[-1] > df['close'][-21:-1].max() * 1.01:
-        setups.append('Breakout Up')
-    elif df['close'].iloc[-1] < df['close'][-21:-1].min() * 0.99:
-        setups.append('Breakout Down')
-
-    if df['close'].iloc[-1] > df['EMA21'].iloc[-1] and df['close'].iloc[-2] < df['EMA21'].iloc[-2]:
-        setups.append('Pullback Up')
-    elif df['close'].iloc[-1] < df['EMA21'].iloc[-1] and df['close'].iloc[-2] > df['EMA21'].iloc[-2]:
-        setups.append('Pullback Down')
-
-    if len(df) >= 4:
-        if df['close'].iloc[-1] < df['close'].iloc[-3] and df['close'].iloc[-3] == df['close'].iloc[-2]:
-            setups.append('Double Top')
-        elif df['close'].iloc[-1] > df['close'].iloc[-3] and df['close'].iloc[-3] == df['close'].iloc[-2]:
-            setups.append('Double Bottom')
-    return setups
-
-# بررسی سیگنال
-def check_signal(df, symbol, change):
-    price = df['close'].iloc[-1]
-    trend = 'neutral'
-    if price > df['EMA21'].iloc[-1]:
-        trend = 'bullish'
-    elif price < df['EMA21'].iloc[-1]:
-        trend = 'bearish'
-
-    # شرط حجم: کندل آخر > 1.5 × میانگین حجم 20 کندل قبلی
-    if len(df) < 21:
-        return None
-    if df['volume'].iloc[-1] <= 1.5 * df['volume'].iloc[-21:-1].mean():
-        return None
-
-    patterns = detect_candlestick_patterns(df)
-    setups = detect_setups(df)
-    divergence = detect_rsi_divergence(df)
-    flag_patterns = detect_pattern_flags(df)
-
-    atr_check = df['ATR'].iloc[-1] > df['ATR'].rolling(14).mean().iloc[-1]
-    stoch_check = df['StochRSI'].iloc[-1] > 0.8 if trend == 'bearish' else df['StochRSI'].iloc[-1] < 0.2
-    ichimoku_check = (
-        price > df['SenkouA'].iloc[-1] and price > df['SenkouB'].iloc[-1]
-        if trend == 'bullish'
-        else price < df['SenkouA'].iloc[-1] and price < df['SenkouB'].iloc[-1]
-    )
-
-    fib_check = True
-    if 'Fib_618' in df.columns:
-        # اگر قیمت نزدیک یکی از سطوح مهم فیبوناچی بود
-        fib_levels = [df['Fib_236'].iloc[-1], df['Fib_382'].iloc[-1], df['Fib_5'].iloc[-1], df['Fib_618'].iloc[-1], df['Fib_786'].iloc[-1]]
-        fib_check = any(abs(price - lvl) / price < 0.003 for lvl in fib_levels)
-
-    if patterns and setups and atr_check and stoch_check and ichimoku_check and fib_check:
-        signal_type = 'LONG' if trend == 'bullish' else 'SHORT'
-        entry = price
-        tp = price * 1.01 if signal_type == 'LONG' else price * 0.99
-        stop = price * 0.995 if signal_type == 'LONG' else price * 1.005
-        return {
-            'entry': entry,
-            'tp': tp,
-            'stop': stop,
-            'type': signal_type
-        }
-    if patterns and setups and atr_check and stoch_check and ichimoku_check:
-        # فیلتر بر اساس واگرایی RSI
-        if (trend == 'bullish' and divergence != 'bearish') or (trend == 'bearish' and divergence != 'bullish'):
-            # بررسی الگوهای پرچم و مثلث
-            if flag_patterns:
-                signal_type = 'LONG' if trend == 'bullish' else 'SHORT'
-                entry = price
-                tp = price * 1.01 if signal_type == 'LONG' else price * 0.99
-                stop = price * 0.995 if signal_type == 'LONG' else price * 1.005
-                return {
-                    'entry': entry,
-                    'tp': tp,
-                    'stop': stop,
-                    'type': signal_type,
-                    'patterns': flag_patterns
-                }
-            else:
-                # اگر هیچ الگویی نبود، سیگنال بر اساس روند قبلی
-                signal_type = 'LONG' if trend == 'bullish' else 'SHORT'
-                entry = price
-                tp = price * 1.01 if signal_type == 'LONG' else price * 0.99
-                stop = price * 0.995 if signal_type == 'LONG' else price * 1.005
-                return {
-                    'entry': entry,
-                    'tp': tp,
-                    'stop': stop,
-                    'type': signal_type,
-                    'patterns': []
-                }
-    return None
-
-# حلقه اصلی
-def main():
-    print("🚀 ربات Multi-Coin & Multi-Timeframe با آلارم خودکار شروع شد")
+# ─── اجرای استراتژی ───
+def run_bot():
     while True:
         try:
-            top_symbols = get_top_symbols()
-            alerts = []
-            for symbol_data in top_symbols:
-                symbol = symbol_data['symbol']
-                tf_signals = []
-                for tf in TIMEFRAMES:
-                    df = get_ohlcv_df(symbol, tf)
+            for symbol in symbols:
+                df = fetch_ohlcv(symbol, timeframe, limit)
+                if df is not None:
                     df = calculate_indicators(df)
-                    signal = check_signal(df, symbol, symbol_data['change'])
+                    signal = generate_signal(df)
                     if signal:
-                        tf_signals.append(signal)
-
-                if tf_signals:
-                    longs = [s for s in tf_signals if s['type'] == 'LONG']
-                    shorts = [s for s in tf_signals if s['type'] == 'SHORT']
-                    if len(longs) >= 2:
-                        alerts.append((symbol, longs[0]))
-                    elif len(shorts) >= 2:
-                        alerts.append((symbol, shorts[0]))
-
-            if alerts:
-                msg = "🚨 Multi-Coin Alert 🚨\n"
-                for symbol, s in alerts:
-                    msg += f"{symbol} → {s['type']} | Entry: {s['entry']:.4f} | TP: {s['tp']:.4f} | Stop: {s['stop']:.4f}\n"
-                    msg += (
-                        f"{symbol}\n"
-                        f"➡️ نوع سیگنال: {s['type']}\n"
-                        f"💰 ورود: {s['entry']:.4f}\n"
-                        f"🎯 تارگت: {s['tp']:.4f}\n"
-                        f"🛑 استاپ: {s['stop']:.4f}\n"
-                    )
-                    if s['patterns']:
-                        msg += f"🔹 الگوهای تشخیص داده شده: {', '.join(s['patterns'])}\n"
-                    msg += "\n"
-                try:
-                    bot.send_message(chat_id=CHAT_ID, text=msg)
-                except Exception as e:
-                    print(f"[Telegram Error] {e}")
-
-            print("⏳ صبر برای ۵ دقیقه بعدی ...\n")
-            time.sleep(300)
+                        msg = f"📊 سیگنال {signal} برای {symbol}\nقیمت: {df['close'].iloc[-1]:.2f}"
+                        send_telegram_message(msg)
+                        logging.info(msg)
+                time.sleep(2)  # جلوگیری از محدودیت API
         except Exception as e:
-            print(f"⚠️ خطا: {e}")
-            time.sleep(30)
+            logging.error(f"⚠️ خطای کلی در اجرای ربات: {e}")
+        time.sleep(60)  # هر ۱ دقیقه اجرا شود
 
+# ─── اجرای اصلی ───
 if __name__ == "__main__":
-    main()
+    send_telegram_message("✅ ربات ترید شروع به کار کرد.")
+    run_bot()
