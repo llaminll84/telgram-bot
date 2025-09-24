@@ -1,5 +1,5 @@
 # bot3_fixed.py
-import time
+import tim
 import os
 import logging
 import ccxt
