@@ -17,8 +17,8 @@ bot = Bot(token=TELEGRAM_TOKEN)
 # ─── صرافی
 exchange = ccxt.kucoin()
 TOP_N = 80
-TIMEFRAMES = ['5m', '15m', '1h']
-SIGNAL_INTERVAL = 2 * 60 * 60  # فاصله حداقل ۲ ساعت بین سیگنال‌ها
+TIMEFRAMES = ['5m', '1h']  # دو تایم‌فریم
+SIGNAL_INTERVAL = 2 * 60 * 60  # فاصله ۲ ساعت بین سیگنال‌ها
 
 # ─── ذخیره آخرین زمان سیگنال برای هر ارز
 last_signal_time = {}
@@ -96,62 +96,55 @@ def detect_order_block(df):
             blocks.append((recent['low'].iloc[i], recent['high'].iloc[i]))
     return blocks
 
-# ─── بررسی سیگنال با نمره‌دهی
+# ─── بررسی سیگنال با نمره‌دهی و ایموجی
 def check_signal(df, symbol, change):
     price = df['close'].iloc[-1]
     score = 0
-    conditions = []
+    stars = ''
 
-    # روند
     trend = 'neutral'
     if price > df['SenkouA'].iloc[-1] and price > df['SenkouB'].iloc[-1]:
         trend = 'bullish'
     elif price < df['SenkouA'].iloc[-1] and price < df['SenkouB'].iloc[-1]:
         trend = 'bearish'
 
-    # کندل
     patterns = detect_candlestick_patterns(df)
     if trend=='bullish' and any(p in patterns for p in ['Bullish Engulfing','Hammer','Morning Star']):
         score += 1
-        conditions.append('*')
+        stars += '🔹'
     if trend=='bearish' and any(p in patterns for p in ['Bearish Engulfing','Hanging Man','Evening Star']):
         score += 1
-        conditions.append('*')
+        stars += '🔹'
 
-    # Order Block
     order_blocks = detect_order_block(df)
     if order_blocks:
         score += 1
-        conditions.append('*')
+        stars += '🔹'
 
-    # حجم
     volume_check = df['volume'].iloc[-1] > df['volume'].rolling(20).mean().iloc[-1]*1.5
     if volume_check:
         score += 1
-        conditions.append('*')
+        stars += '🔹'
 
-    # StochRSI
     stoch_rsi_check = df['StochRSI'].iloc[-1] > 0.8 if trend=='bearish' else df['StochRSI'].iloc[-1]<0.2
     if stoch_rsi_check:
         score += 1
-        conditions.append('*')
+        stars += '🔹'
 
-    # ATR
     atr_check = df['ATR'].iloc[-1] > df['ATR'].rolling(14).mean().iloc[-1]
     if atr_check:
         score += 1
-        conditions.append('*')
+        stars += '🔹'
 
-    # EMA+MACD
     if trend=='bullish' and df['close'].iloc[-1]>df['EMA21'].iloc[-1] and df['MACD'].iloc[-1]>df['Signal'].iloc[-1]:
         score += 1
-        conditions.append('*')
+        stars += '🔹'
     if trend=='bearish' and df['close'].iloc[-1]<df['EMA21'].iloc[-1] and df['MACD'].iloc[-1]<df['Signal'].iloc[-1]:
         score += 1
-        conditions.append('*')
+        stars += '🔹'
 
-    # حد نصاب برای ارسال سیگنال
-    if score >= 4:
+    # حداقل ۲ شرط برای صدور سیگنال
+    if score >= 2:
         if trend=='bullish':
             entry = price
             tp = price * 1.01
@@ -169,7 +162,7 @@ def check_signal(df, symbol, change):
             'type': signal_type,
             'patterns': patterns,
             'order_blocks': order_blocks,
-            'stars': ''.join(conditions)
+            'stars': stars
         }
     return None
 
@@ -177,7 +170,7 @@ def check_signal(df, symbol, change):
 def main():
     print("🚀 ربات Multi-Coin & Multi-Timeframe با آلارم خودکار شروع شد")
     send_telegram("✅ ربات فعال شد و شروع به کار می‌کند. فاز گرم شدن ۵ دقیقه...")
-    time.sleep(300)  # فاز گرم شدن ۵ دقیقه
+    time.sleep(300)  # فاز گرم شدن
 
     while True:
         try:
@@ -195,11 +188,20 @@ def main():
                     df = get_ohlcv_df(symbol, tf)
                     df = calculate_indicators(df)
                     signal = check_signal(df, symbol, symbol_data['change'])
+
+                    # چاپ لاگ در کنسول
+                    print(
+                        f"[LOG] {symbol} | TF: {tf} | Close: {df['close'].iloc[-1]:.4f} "
+                        f"| Change: {symbol_data['change']:.2f}% "
+                        f"| Signal: {signal['type'] if signal else 'None'} "
+                        f"| Stars: {signal['stars'] if signal else ''}"
+                    )
+
                     if signal:
                         tf_signals.append(signal)
 
-                # تایید حداقل دو تایم‌فریم
-                if len(tf_signals) >= 2:
+                # حداقل یکی از تایم‌فریم‌ها ۲ شرط داشته باشد
+                if any(len(s['stars']) >= 2 for s in tf_signals):
                     alerts.append((symbol, tf_signals))
                     last_signal_time[symbol] = time.time()
 
