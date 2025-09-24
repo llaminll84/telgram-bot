@@ -116,3 +116,41 @@ def run_bot():
 if __name__ == "__main__":
     send_telegram_message("✅ ربات ترید شروع به کار کرد (نسخه اصلاحی).")
     run_bot()
+# ─── ارسال پیام به تلگرام ───
+def send_telegram_message(message):
+    try:
+        bot.send_message(chat_id=CHAT_ID, text=message)
+        logging.info(f"📩 پیام ارسال شد: {message}")
+    except Exception as e:
+        logging.error(f"❌ خطا در ارسال پیام تلگرام: {e}")
+
+# ─── اجرای ربات ───
+def run_bot():
+    last_signal = {}
+
+    while True:
+        try:
+            for symbol in symbols:
+                df = fetch_ohlcv(symbol, timeframe, limit)
+                if df is not None:
+                    df = calculate_indicators(df)
+                    signal = generate_signal(df)
+
+                    if signal and last_signal.get(symbol) != signal:
+                        price = df["close"].iloc[-1]
+                        msg = f"📊 سیگنال {signal} برای {symbol}\nقیمت: {price:.2f}"
+                        send_telegram_message(msg)
+                        last_signal[symbol] = signal
+                        logging.info(msg)
+
+                time.sleep(2)  # جلوگیری از محدودیت API
+
+        except Exception as e:
+            logging.error(f"⚠️ خطای کلی در اجرای ربات: {e}")
+
+        time.sleep(60)  # اجرای هر ۱ دقیقه
+
+# ─── اجرای اصلی ───
+if __name__ == "__main__":
+    send_telegram_message("✅ ربات ترید (نسخه نهایی ۱۸ام) شروع به کار کرد.")
+    run_bot()
