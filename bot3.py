@@ -19,7 +19,7 @@ bot.send_message(chat_id=CHAT_ID, text="✅ ربات با موفقیت راه‌
 exchange = ccxt.kucoin()
 
 TOP_N = 80
-TIMEFRAMES = ['5m','15m','30m','1h','4h']
+TIMEFRAMES = ['5m', '1h']
 last_signal_time = {}
 
 SIGNAL_INTERVAL = 5 * 60  # 5 دقیقه فاصله بین سیگنال‌ها
@@ -162,7 +162,7 @@ def main():
                     tf_signals.append(signal)
 
                 # اگر حداقل در یکی از تایم‌فریم‌ها شرط‌ها >=2 بود سیگنال بده
-                if any(len(s['stars']) >= 1 for s in tf_signals):
+                if any(len(s['stars']) >= 2 for s in tf_signals):
                     alerts.append((symbol, tf_signals))
                     last_signal_time[symbol] = time.time()
 
