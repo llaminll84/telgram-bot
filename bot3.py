@@ -17,8 +17,8 @@ bot = Bot(token=TELEGRAM_TOKEN)
 # ─── صرافی
 exchange = ccxt.kucoin()
 TOP_N = 80
-TIMEFRAMES = ['5m', '1h']  # دو تایم‌فریم
-SIGNAL_INTERVAL = 2 * 60 * 60  # فاصله ۲ ساعت بین سیگنال‌ها
+TIMEFRAMES = ['5m','15m','1h','4h' ]  # دو تایم‌فریم
+SIGNAL_INTERVAL = 5 * 60  # فاصله ۲ ساعت بین سیگنال‌ها
 
 # ─── ذخیره آخرین زمان سیگنال برای هر ارز
 last_signal_time = {}
