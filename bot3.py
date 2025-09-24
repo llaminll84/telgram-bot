@@ -1,5 +1,5 @@
 import os
-import time
+import tim
 import logging
 import ccxt
 import pandas as pd
