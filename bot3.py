@@ -4,31 +4,25 @@ import ccxt
 import pandas as pd
 import numpy as np
 from telegram import Bot
-from keep_alive import keep_alive
+from keep_alive import keep_alive  # سرور کوچک برای جلوگیری از خوابیدن کانتینر
 
 # ─── سرور کوچک
 keep_alive()
 
-# ─── تنظیمات تلگرام
+# ─── اطلاعات ربات تلگرام
 TELEGRAM_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 bot = Bot(token=TELEGRAM_TOKEN)
 
-# ─── صرافی
-exchange = ccxt.kucoin()
-TOP_N = 80
-TIMEFRAMES = ['5m','15m','1h','4h' ]  # دو تایم‌فریم
-SIGNAL_INTERVAL = 5 * 60  # فاصله ۲ ساعت بین سیگنال‌ها
+bot.send_message(chat_id=CHAT_ID, text="✅ ربات با موفقیت راه‌اندازی شد!")
 
-# ─── ذخیره آخرین زمان سیگنال برای هر ارز
+exchange = ccxt.kucoin()
+
+TOP_N = 80
+TIMEFRAMES = ['5m','15m','30m','1h','4h']
 last_signal_time = {}
 
-# ─── ارسال پیام تلگرام
-def send_telegram(msg):
-    try:
-        bot.send_message(chat_id=CHAT_ID, text=msg)
-    except Exception as e:
-        print(f"[Telegram Error] {e}")
+SIGNAL_INTERVAL = 5 * 60  # 5 دقیقه فاصله بین سیگنال‌ها
 
 # ─── گرفتن ۸۰ ارز برتر
 def get_top_symbols():
@@ -50,7 +44,7 @@ def get_ohlcv_df(symbol, timeframe):
     df = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
     return df
 
-# ─── محاسبه اندیکاتورها
+# ─── اندیکاتورها
 def calculate_indicators(df):
     df['EMA9'] = df['close'].ewm(span=9, adjust=False).mean()
     df['EMA21'] = df['close'].ewm(span=21, adjust=False).mean()
@@ -64,8 +58,8 @@ def calculate_indicators(df):
     df['StochRSI'] = (df['close'] - df['close'].rolling(14).min()) / (df['close'].rolling(14).max() - df['close'].rolling(14).min())
     df['Tenkan'] = (df['high'].rolling(9).max() + df['low'].rolling(9).min()) / 2
     df['Kijun'] = (df['high'].rolling(26).max() + df['low'].rolling(26).min()) / 2
-    df['SenkouA'] = ((df['Tenkan'] + df['Kijun'])/2).shift(26)
-    df['SenkouB'] = ((df['high'].rolling(52).max() + df['low'].rolling(52).min())/2).shift(26)
+    df['SenkouA'] = ((df['Tenkan'] + df['Kijun']) / 2).shift(26)
+    df['SenkouB'] = ((df['high'].rolling(52).max() + df['low'].rolling(52).min()) / 2).shift(26)
     return df
 
 # ─── شناسایی کندل‌ها
@@ -73,35 +67,31 @@ def detect_candlestick_patterns(df):
     patterns = []
     open_, close, high, low = df['open'].iloc[-1], df['close'].iloc[-1], df['high'].iloc[-1], df['low'].iloc[-1]
     prev_open, prev_close = df['open'].iloc[-2], df['close'].iloc[-2]
-
     if prev_close < prev_open and close > open_ and close > prev_open and open_ < prev_close:
         patterns.append('Bullish Engulfing')
     if prev_close > prev_open and close < open_ and open_ > prev_close and close < prev_open:
         patterns.append('Bearish Engulfing')
-    if (close - low) > 2*(open_-low):
+    if (close - low) > 2 * (open_ - low):
         patterns.append('Hammer')
-    if (high-close) > 2*(high-open_):
+    if (high - close) > 2 * (high - open_):
         patterns.append('Hanging Man')
-    if abs(close-open_)/(high-low+1e-9) < 0.1:
+    if abs(close - open_) / (high - low + 1e-9) < 0.1:
         patterns.append('Doji')
     return patterns
 
-# ─── شناسایی Order Block
+# ─── شناسایی Order Block ساده
 def detect_order_block(df):
     recent = df[-5:]
     blocks = []
     threshold = df['close'].std() * 1.5
-    for i in range(len(recent)-1):
-        if abs(recent['close'].iloc[i]-recent['open'].iloc[i]) > threshold:
+    for i in range(len(recent) - 1):
+        if abs(recent['close'].iloc[i] - recent['open'].iloc[i]) > threshold:
             blocks.append((recent['low'].iloc[i], recent['high'].iloc[i]))
     return blocks
 
-# ─── بررسی سیگنال با نمره‌دهی و ایموجی
+# ─── بررسی سیگنال و شروط
 def check_signal(df, symbol, change):
     price = df['close'].iloc[-1]
-    score = 0
-    stars = ''
-
     trend = 'neutral'
     if price > df['SenkouA'].iloc[-1] and price > df['SenkouB'].iloc[-1]:
         trend = 'bullish'
@@ -109,69 +99,44 @@ def check_signal(df, symbol, change):
         trend = 'bearish'
 
     patterns = detect_candlestick_patterns(df)
-    if trend=='bullish' and any(p in patterns for p in ['Bullish Engulfing','Hammer','Morning Star']):
-        score += 1
-        stars += '🔹'
-    if trend=='bearish' and any(p in patterns for p in ['Bearish Engulfing','Hanging Man','Evening Star']):
-        score += 1
-        stars += '🔹'
-
     order_blocks = detect_order_block(df)
-    if order_blocks:
-        score += 1
-        stars += '🔹'
-
-    volume_check = df['volume'].iloc[-1] > df['volume'].rolling(20).mean().iloc[-1]*1.5
-    if volume_check:
-        score += 1
-        stars += '🔹'
-
-    stoch_rsi_check = df['StochRSI'].iloc[-1] > 0.8 if trend=='bearish' else df['StochRSI'].iloc[-1]<0.2
-    if stoch_rsi_check:
-        score += 1
-        stars += '🔹'
-
+    volume_check = df['volume'].iloc[-1] > df['volume'].rolling(20).mean().iloc[-1] * 1.5
+    stoch_rsi_check = df['StochRSI'].iloc[-1] > 0.8 if trend == 'bearish' else df['StochRSI'].iloc[-1] < 0.2
     atr_check = df['ATR'].iloc[-1] > df['ATR'].rolling(14).mean().iloc[-1]
-    if atr_check:
-        score += 1
-        stars += '🔹'
 
-    if trend=='bullish' and df['close'].iloc[-1]>df['EMA21'].iloc[-1] and df['MACD'].iloc[-1]>df['Signal'].iloc[-1]:
-        score += 1
-        stars += '🔹'
-    if trend=='bearish' and df['close'].iloc[-1]<df['EMA21'].iloc[-1] and df['MACD'].iloc[-1]<df['Signal'].iloc[-1]:
-        score += 1
-        stars += '🔹'
+    stars = []
+    if volume_check: stars.append('🔹')
+    if stoch_rsi_check: stars.append('🔹')
+    if atr_check: stars.append('🔹')
+    if patterns: stars.append('🔹')
 
-    # حداقل ۲ شرط برای صدور سیگنال
-    if score >= 2:
-        if trend=='bullish':
-            entry = price
-            tp = price * 1.01
-            stop = price - df['ATR'].iloc[-1]
-            signal_type = 'LONG'
-        else:
-            entry = price
-            tp = price * 0.99
-            stop = price + df['ATR'].iloc[-1]
-            signal_type = 'SHORT'
-        return {
-            'entry': entry,
-            'tp': tp,
-            'stop': stop,
-            'type': signal_type,
-            'patterns': patterns,
-            'order_blocks': order_blocks,
-            'stars': stars
-        }
-    return None
+    signal_type = None
+    entry = tp = stop = None
 
-# ─── اجرای ربات
+    if change >= 1 and trend == 'bullish' and len(stars) >= 2:
+        signal_type = 'LONG'
+        entry = price
+        tp = price * 1.01
+        stop = price * 0.995
+    elif change <= -1 and trend == 'bearish' and len(stars) >= 2:
+        signal_type = 'SHORT'
+        entry = price
+        tp = price * 0.99
+        stop = price * 1.005
+
+    return {
+        'entry': entry,
+        'tp': tp,
+        'stop': stop,
+        'type': signal_type,
+        'patterns': patterns,
+        'order_blocks': order_blocks,
+        'stars': stars
+    }
+
+# ─── تابع اصلی ربات
 def main():
     print("🚀 ربات Multi-Coin & Multi-Timeframe با آلارم خودکار شروع شد")
-    send_telegram("✅ ربات فعال شد و شروع به کار می‌کند. فاز گرم شدن ۵ دقیقه...")
-    time.sleep(300)  # فاز گرم شدن
-
     while True:
         try:
             top_symbols = get_top_symbols()
@@ -179,29 +144,25 @@ def main():
 
             for symbol_data in top_symbols:
                 symbol = symbol_data['symbol']
-                # بررسی فاصله زمانی
-                if symbol in last_signal_time and (time.time() - last_signal_time[symbol]) < SIGNAL_INTERVAL:
-                    continue
-
                 tf_signals = []
+
                 for tf in TIMEFRAMES:
-                    df = get_ohlcv_df(symbol, tf)
-                    df = calculate_indicators(df)
-                    signal = check_signal(df, symbol, symbol_data['change'])
+                    try:
+                        df = get_ohlcv_df(symbol, tf)
+                        df = calculate_indicators(df)
+                        signal = check_signal(df, symbol, symbol_data['change'])
+                    except Exception as e:
+                        print(f"[ERROR] {symbol} | TF: {tf} | {e}")
+                        continue
 
-                    # چاپ لاگ در کنسول
-                    print(
-                        f"[LOG] {symbol} | TF: {tf} | Close: {df['close'].iloc[-1]:.4f} "
-                        f"| Change: {symbol_data['change']:.2f}% "
-                        f"| Signal: {signal['type'] if signal else 'None'} "
-                        f"| Stars: {signal['stars'] if signal else ''}"
-                    )
+                    # لاگ کامل همه ارزها
+                    print(f"[LOG] {symbol} | TF: {tf} | Close: {df['close'].iloc[-1]:.4f} | "
+                          f"Change: {symbol_data['change']:.2f}% | Signal: {signal['type']} | Stars: {''.join(signal['stars'])}")
 
-                    if signal:
-                        tf_signals.append(signal)
+                    tf_signals.append(signal)
 
-                # حداقل یکی از تایم‌فریم‌ها ۲ شرط داشته باشد
-                if any(len(s['stars']) >= 2 for s in tf_signals):
+                # اگر حداقل در یکی از تایم‌فریم‌ها شرط‌ها >=2 بود سیگنال بده
+                if any(len(s['stars']) >= 1 for s in tf_signals):
                     alerts.append((symbol, tf_signals))
                     last_signal_time[symbol] = time.time()
 
@@ -210,17 +171,18 @@ def main():
                 msg = "🚨 Multi-Coin Alert 🚨\n"
                 for symbol, sigs in alerts:
                     for s in sigs:
-                        msg += (
-                            f"{symbol}\n"
-                            f"Type: {s['type']}\n"
-                            f"Entry: {s['entry']:.4f}\n"
-                            f"TP: {s['tp']:.4f}\n"
-                            f"Stop: {s['stop']:.4f}\n"
-                            f"Patterns: {s['patterns']}\n"
-                            f"Order Blocks: {s['order_blocks']}\n"
-                            f"Conditions: {s['stars']}\n\n"
-                        )
-                send_telegram(msg)
+                        if not s['type']:
+                            continue
+                        color_emoji = "🟢" if s['type'] == "LONG" else "🔴"
+                        msg += (f"{color_emoji} {symbol}\n"
+                                f"Type: {s['type']}\n"
+                                f"Entry: {s['entry']:.4f}\n"
+                                f"TP: {s['tp']:.4f}\n"
+                                f"Stop: {s['stop']:.4f}\n"
+                                f"Patterns: {s['patterns']}\n"
+                                f"Order Blocks: {s['order_blocks']}\n"
+                                f"Conditions: {''.join(s['stars'])}\n\n")
+                bot.send_message(chat_id=CHAT_ID, text=msg)
 
             print("⏳ صبر برای ۵ دقیقه بعدی ...\n")
             time.sleep(300)
