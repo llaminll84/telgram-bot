@@ -7,7 +7,7 @@ from telegram import Bot
 from keep_alive import keep_alive  # سرور کوچک برای جلوگیری از خوابیدن کانتینر
 
 # ─── سرور کوچک
-keep_alive()
+keep_alive()  
 
 # ─── اطلاعات ربات تلگرام
 TELEGRAM_TOKEN = os.getenv("BOT_TOKEN")
@@ -37,12 +37,12 @@ def calculate_position_size(entry, stop):
     position_size = risk_amount / risk_per_unit
     return round(position_size, 3)
 
-# ─── گرفتن ۸۰ ارز برتر
-def get_top_symbols():
+# ─── گرفتن ۸۰ ارز برتر با فیلتر حجم (گزینه 1)
+def get_top_symbols(min_volume=500000):  # حداقل 500K USDT حجم
     tickers = exchange.fetch_tickers()
     symbols = []
     for symbol, data in tickers.items():
-        if symbol.endswith('/USDT'):
+        if symbol.endswith('/USDT') and data['quoteVolume'] >= min_volume:
             symbols.append({
                 'symbol': symbol,
                 'volume': data['quoteVolume'],
@@ -124,22 +124,6 @@ def detect_candlestick_patterns(df):
     if abs(close - open_) / (high - low + 1e-9) < 0.1:
         patterns.append('Doji')
 
-    # الگوهای بیشتر
-    if p2_close < p2_open and abs(prev_close - prev_open) < (p2_open - p2_close)*0.3 and close > (p2_open + p2_close)/2:
-        patterns.append("Morning Star")
-    if p2_close > p2_open and abs(prev_close - prev_open) < (p2_close - p2_open)*0.3 and close < (p2_open + p2_close)/2:
-        patterns.append("Evening Star")
-    if (p2_close > p2_open and prev_close > prev_open and close > open_ and 
-        prev_close > p2_close and close > prev_close):
-        patterns.append("Three White Soldiers")
-    if (p2_close < p2_open and prev_close < prev_open and close < open_ and 
-        prev_close < p2_close and close < prev_close):
-        patterns.append("Three Black Crows")
-    if abs(high - df['high'].iloc[-2]) < 0.002*high:
-        patterns.append("Tweezer Top")
-    if abs(low - df['low'].iloc[-2]) < 0.002*low:
-        patterns.append("Tweezer Bottom")
-
     return patterns
 
 # ─── شناسایی Order Block ساده
@@ -164,7 +148,7 @@ def check_signal(df, symbol, change):
     patterns = detect_candlestick_patterns(df)
     order_blocks = detect_order_block(df)
 
-    # شروط
+    # شروط (حداقل ۲ شرط باید برقرار باشه → گزینه 5)
     stars = []
     if df['volume'].iloc[-1] > df['volume'].rolling(20).mean().iloc[-1] * 1.5: stars.append('🔹')
     if df['StochRSI'].iloc[-1] > 0.8 if trend == 'bearish' else df['StochRSI'].iloc[-1] < 0.2: stars.append('🔹')
@@ -191,7 +175,7 @@ def check_signal(df, symbol, change):
     if signal_type and entry and stop:
         size = calculate_position_size(entry, stop)
 
-    # جلوگیری از تکرار
+    # جلوگیری از تکرار (گزینه 6)
     prev = last_alerts.get(symbol)
     if prev and prev["type"] == signal_type:
         return None
@@ -239,9 +223,14 @@ def main():
 
                     tf_signals.append(signal)
 
-                if any(len(s['stars']) >= 2 for s in tf_signals):
-                    alerts.append((symbol, tf_signals))
-                    last_signal_time[symbol] = time.time()
+                # شرط تأیید در حداقل ۲ تایم‌فریم (گزینه 4)
+                if len(tf_signals) >= 2:
+                    types = [s['type'] for s in tf_signals if s['type']]
+                    if types and len(set(types)) == 1:  # همه LONG یا همه SHORT
+                        if any(len(s['stars']) >= 2 for s in tf_signals):
+                            if symbol not in last_signal_time or time.time() - last_signal_time[symbol] > SIGNAL_INTERVAL:
+                                alerts.append((symbol, tf_signals))
+                                last_signal_time[symbol] = time.time()
 
             # ارسال پیام تلگرام
             if alerts:
