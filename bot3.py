@@ -21,8 +21,21 @@ exchange = ccxt.kucoin()
 TOP_N = 80
 TIMEFRAMES = ['5m','15m','30m','1h','4h']
 last_signal_time = {}
+last_alerts = {}  # برای جلوگیری از سیگنال تکراری
 
 SIGNAL_INTERVAL = 5 * 60  # 5 دقیقه فاصله بین سیگنال‌ها
+
+# ─── مدیریت ریسک ───
+ACCOUNT_BALANCE = 1000   # موجودی فرضی (دلار)
+RISK_PER_TRADE = 0.01    # 1 درصد ریسک در هر معامله
+
+def calculate_position_size(entry, stop):
+    risk_amount = ACCOUNT_BALANCE * RISK_PER_TRADE
+    risk_per_unit = abs(entry - stop)
+    if risk_per_unit == 0:
+        return 0
+    position_size = risk_amount / risk_per_unit
+    return round(position_size, 3)
 
 # ─── گرفتن ۸۰ ارز برتر
 def get_top_symbols():
@@ -60,6 +73,37 @@ def calculate_indicators(df):
     df['Kijun'] = (df['high'].rolling(26).max() + df['low'].rolling(26).min()) / 2
     df['SenkouA'] = ((df['Tenkan'] + df['Kijun']) / 2).shift(26)
     df['SenkouB'] = ((df['high'].rolling(52).max() + df['low'].rolling(52).min()) / 2).shift(26)
+
+    # RSI
+    delta = df['close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+    rs = gain / (loss + 1e-9)
+    df['RSI'] = 100 - (100 / (1 + rs))
+
+    # ADX
+    df['TR'] = np.maximum.reduce([
+        df['high'] - df['low'],
+        abs(df['high'] - df['close'].shift()),
+        abs(df['low'] - df['close'].shift())
+    ])
+    df['ATR14'] = df['TR'].rolling(14).mean()
+    df['+DM'] = np.where((df['high'].diff() > df['low'].diff()) & (df['high'].diff() > 0),
+                         df['high'].diff(), 0)
+    df['-DM'] = np.where((df['low'].diff() > df['high'].diff()) & (df['low'].diff() > 0),
+                         df['low'].diff(), 0)
+    df['+DI'] = 100 * (df['+DM'].ewm(alpha=1/14).mean() / df['ATR14'])
+    df['-DI'] = 100 * (df['-DM'].ewm(alpha=1/14).mean() / df['ATR14'])
+    df['DX'] = (abs(df['+DI'] - df['-DI']) / (df['+DI'] + df['-DI'] + 1e-9)) * 100
+    df['ADX'] = df['DX'].ewm(alpha=1/14).mean()
+
+    # SuperTrend
+    factor = 3
+    hl2 = (df['high'] + df['low']) / 2
+    df['UpperBand'] = hl2 + (factor * df['ATR14'])
+    df['LowerBand'] = hl2 - (factor * df['ATR14'])
+    df['SuperTrend'] = np.where(df['close'] > df['UpperBand'], 1,
+                                np.where(df['close'] < df['LowerBand'], -1, 0))
     return df
 
 # ─── شناسایی کندل‌ها
@@ -67,6 +111,8 @@ def detect_candlestick_patterns(df):
     patterns = []
     open_, close, high, low = df['open'].iloc[-1], df['close'].iloc[-1], df['high'].iloc[-1], df['low'].iloc[-1]
     prev_open, prev_close = df['open'].iloc[-2], df['close'].iloc[-2]
+    p2_open, p2_close = df['open'].iloc[-3], df['close'].iloc[-3]
+
     if prev_close < prev_open and close > open_ and close > prev_open and open_ < prev_close:
         patterns.append('Bullish Engulfing')
     if prev_close > prev_open and close < open_ and open_ > prev_close and close < prev_open:
@@ -77,6 +123,23 @@ def detect_candlestick_patterns(df):
         patterns.append('Hanging Man')
     if abs(close - open_) / (high - low + 1e-9) < 0.1:
         patterns.append('Doji')
+
+    # الگوهای بیشتر
+    if p2_close < p2_open and abs(prev_close - prev_open) < (p2_open - p2_close)*0.3 and close > (p2_open + p2_close)/2:
+        patterns.append("Morning Star")
+    if p2_close > p2_open and abs(prev_close - prev_open) < (p2_close - p2_open)*0.3 and close < (p2_open + p2_close)/2:
+        patterns.append("Evening Star")
+    if (p2_close > p2_open and prev_close > prev_open and close > open_ and 
+        prev_close > p2_close and close > prev_close):
+        patterns.append("Three White Soldiers")
+    if (p2_close < p2_open and prev_close < prev_open and close < open_ and 
+        prev_close < p2_close and close < prev_close):
+        patterns.append("Three Black Crows")
+    if abs(high - df['high'].iloc[-2]) < 0.002*high:
+        patterns.append("Tweezer Top")
+    if abs(low - df['low'].iloc[-2]) < 0.002*low:
+        patterns.append("Tweezer Bottom")
+
     return patterns
 
 # ─── شناسایی Order Block ساده
@@ -100,18 +163,19 @@ def check_signal(df, symbol, change):
 
     patterns = detect_candlestick_patterns(df)
     order_blocks = detect_order_block(df)
-    volume_check = df['volume'].iloc[-1] > df['volume'].rolling(20).mean().iloc[-1] * 1.5
-    stoch_rsi_check = df['StochRSI'].iloc[-1] > 0.8 if trend == 'bearish' else df['StochRSI'].iloc[-1] < 0.2
-    atr_check = df['ATR'].iloc[-1] > df['ATR'].rolling(14).mean().iloc[-1]
 
+    # شروط
     stars = []
-    if volume_check: stars.append('🔹')
-    if stoch_rsi_check: stars.append('🔹')
-    if atr_check: stars.append('🔹')
+    if df['volume'].iloc[-1] > df['volume'].rolling(20).mean().iloc[-1] * 1.5: stars.append('🔹')
+    if df['StochRSI'].iloc[-1] > 0.8 if trend == 'bearish' else df['StochRSI'].iloc[-1] < 0.2: stars.append('🔹')
+    if df['ATR'].iloc[-1] > df['ATR'].rolling(14).mean().iloc[-1]: stars.append('🔹')
+    if df['RSI'].iloc[-1] < 30 or df['RSI'].iloc[-1] > 70: stars.append("🔹")
+    if df['ADX'].iloc[-1] > 25: stars.append("🔹")
+    if df['SuperTrend'].iloc[-1] != 0: stars.append("🔹")
     if patterns: stars.append('🔹')
 
     signal_type = None
-    entry = tp = stop = None
+    entry = tp = stop = size = None
 
     if change >= 1 and trend == 'bullish' and len(stars) >= 2:
         signal_type = 'LONG'
@@ -124,6 +188,17 @@ def check_signal(df, symbol, change):
         tp = price * 0.99
         stop = price * 1.005
 
+    if signal_type and entry and stop:
+        size = calculate_position_size(entry, stop)
+
+    # جلوگیری از تکرار
+    prev = last_alerts.get(symbol)
+    if prev and prev["type"] == signal_type:
+        return None
+
+    if signal_type:
+        last_alerts[symbol] = {"type": signal_type, "time": time.time()}
+
     return {
         'entry': entry,
         'tp': tp,
@@ -131,7 +206,8 @@ def check_signal(df, symbol, change):
         'type': signal_type,
         'patterns': patterns,
         'order_blocks': order_blocks,
-        'stars': stars
+        'stars': stars,
+        'size': size
     }
 
 # ─── تابع اصلی ربات
@@ -151,6 +227,8 @@ def main():
                         df = get_ohlcv_df(symbol, tf)
                         df = calculate_indicators(df)
                         signal = check_signal(df, symbol, symbol_data['change'])
+                        if not signal:
+                            continue
                     except Exception as e:
                         print(f"[ERROR] {symbol} | TF: {tf} | {e}")
                         continue
@@ -161,7 +239,6 @@ def main():
 
                     tf_signals.append(signal)
 
-                # اگر حداقل در یکی از تایم‌فریم‌ها شرط‌ها >=2 بود سیگنال بده
                 if any(len(s['stars']) >= 2 for s in tf_signals):
                     alerts.append((symbol, tf_signals))
                     last_signal_time[symbol] = time.time()
@@ -179,6 +256,7 @@ def main():
                                 f"Entry: {s['entry']:.4f}\n"
                                 f"TP: {s['tp']:.4f}\n"
                                 f"Stop: {s['stop']:.4f}\n"
+                                f"Size: {s['size']}\n"
                                 f"Patterns: {s['patterns']}\n"
                                 f"Order Blocks: {s['order_blocks']}\n"
                                 f"Conditions: {''.join(s['stars'])}\n\n")
