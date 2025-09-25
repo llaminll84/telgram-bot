@@ -3,6 +3,7 @@ import os
 import ccxt
 import pandas as pd
 import numpy as np
+import datetime
 from telegram import Bot
 from keep_alive import keep_alive  # سرور کوچک برای جلوگیری از خوابیدن کانتینر
 
@@ -37,12 +38,12 @@ def calculate_position_size(entry, stop):
     position_size = risk_amount / risk_per_unit
     return round(position_size, 3)
 
-# ─── گرفتن ۸۰ ارز برتر با فیلتر حجم (گزینه 1)
-def get_top_symbols(min_volume=500000):  # حداقل 500K USDT حجم
+# ─── گرفتن ۸۰ ارز برتر
+def get_top_symbols():
     tickers = exchange.fetch_tickers()
     symbols = []
     for symbol, data in tickers.items():
-        if symbol.endswith('/USDT') and data['quoteVolume'] >= min_volume:
+        if symbol.endswith('/USDT'):
             symbols.append({
                 'symbol': symbol,
                 'volume': data['quoteVolume'],
@@ -124,9 +125,25 @@ def detect_candlestick_patterns(df):
     if abs(close - open_) / (high - low + 1e-9) < 0.1:
         patterns.append('Doji')
 
+    # الگوهای بیشتر
+    if p2_close < p2_open and abs(prev_close - prev_open) < (p2_open - p2_close)*0.3 and close > (p2_open + p2_close)/2:
+        patterns.append("Morning Star")
+    if p2_close > p2_open and abs(prev_close - prev_open) < (p2_close - p2_open)*0.3 and close < (p2_open + p2_close)/2:
+        patterns.append("Evening Star")
+    if (p2_close > p2_open and prev_close > prev_open and close > open_ and 
+        prev_close > p2_close and close > prev_close):
+        patterns.append("Three White Soldiers")
+    if (p2_close < p2_open and prev_close < prev_open and close < open_ and 
+        prev_close < p2_close and close < prev_close):
+        patterns.append("Three Black Crows")
+    if abs(high - df['high'].iloc[-2]) < 0.002*high:
+        patterns.append("Tweezer Top")
+    if abs(low - df['low'].iloc[-2]) < 0.002*low:
+        patterns.append("Tweezer Bottom")
+
     return patterns
 
-# ─── شناسایی Order Block ساده
+# ─── شناسایی Order Block ساده (فقط محاسبه، نه در پیام)
 def detect_order_block(df):
     recent = df[-5:]
     blocks = []
@@ -146,9 +163,9 @@ def check_signal(df, symbol, change):
         trend = 'bearish'
 
     patterns = detect_candlestick_patterns(df)
-    order_blocks = detect_order_block(df)
+    detect_order_block(df)  # فقط محاسبه، ولی استفاده نمیشه
 
-    # شروط (حداقل ۲ شرط باید برقرار باشه → گزینه 5)
+    # شروط
     stars = []
     if df['volume'].iloc[-1] > df['volume'].rolling(20).mean().iloc[-1] * 1.5: stars.append('🔹')
     if df['StochRSI'].iloc[-1] > 0.8 if trend == 'bearish' else df['StochRSI'].iloc[-1] < 0.2: stars.append('🔹')
@@ -175,7 +192,7 @@ def check_signal(df, symbol, change):
     if signal_type and entry and stop:
         size = calculate_position_size(entry, stop)
 
-    # جلوگیری از تکرار (گزینه 6)
+    # جلوگیری از تکرار
     prev = last_alerts.get(symbol)
     if prev and prev["type"] == signal_type:
         return None
@@ -189,7 +206,6 @@ def check_signal(df, symbol, change):
         'stop': stop,
         'type': signal_type,
         'patterns': patterns,
-        'order_blocks': order_blocks,
         'stars': stars,
         'size': size
     }
@@ -223,33 +239,32 @@ def main():
 
                     tf_signals.append(signal)
 
-                # شرط تأیید در حداقل ۲ تایم‌فریم (گزینه 4)
-                if len(tf_signals) >= 2:
-                    types = [s['type'] for s in tf_signals if s['type']]
-                    if types and len(set(types)) == 1:  # همه LONG یا همه SHORT
-                        if any(len(s['stars']) >= 2 for s in tf_signals):
-                            if symbol not in last_signal_time or time.time() - last_signal_time[symbol] > SIGNAL_INTERVAL:
-                                alerts.append((symbol, tf_signals))
-                                last_signal_time[symbol] = time.time()
+                if any(len(s['stars']) >= 2 for s in tf_signals):
+                    alerts.append((symbol, tf_signals))
+                    last_signal_time[symbol] = time.time()
 
-            # ارسال پیام تلگرام
+            # ارسال پیام تلگرام (هر سیگنال جداگانه)
             if alerts:
-                msg = "🚨 Multi-Coin Alert 🚨\n"
                 for symbol, sigs in alerts:
                     for s in sigs:
                         if not s['type']:
                             continue
+
                         color_emoji = "🟢" if s['type'] == "LONG" else "🔴"
-                        msg += (f"{color_emoji} {symbol}\n"
-                                f"Type: {s['type']}\n"
-                                f"Entry: {s['entry']:.4f}\n"
-                                f"TP: {s['tp']:.4f}\n"
-                                f"Stop: {s['stop']:.4f}\n"
-                                f"Size: {s['size']}\n"
-                                f"Patterns: {s['patterns']}\n"
-                                f"Order Blocks: {s['order_blocks']}\n"
-                                f"Conditions: {''.join(s['stars'])}\n\n")
-                bot.send_message(chat_id=CHAT_ID, text=msg)
+                        now_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                        msg = (f"🚨 Multi-Coin Alert 🚨\n"
+                               f"{color_emoji} {symbol}\n"
+                               f"Type: {s['type']}\n"
+                               f"Entry: {s['entry']:.4f}\n"
+                               f"TP: {s['tp']:.4f}\n"
+                               f"Stop: {s['stop']:.4f}\n"
+                               f"Size: {s['size']}\n"
+                               f"Patterns: {s['patterns']}\n"
+                               f"Conditions: {''.join(s['stars'])}\n"
+                               f"🕒 Time: {now_time}")
+
+                        bot.send_message(chat_id=CHAT_ID, text=msg)
 
             print("⏳ صبر برای ۵ دقیقه بعدی ...\n")
             time.sleep(300)
