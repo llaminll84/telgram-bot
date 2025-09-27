@@ -60,6 +60,9 @@ def get_ohlcv_df(symbol, timeframe):
 
 # ─── اندیکاتورها
 def calculate_indicators(df):
+    if len(df) < 60:   # جلوگیری از خطا در دیتای کم
+        return df
+
     df['EMA9'] = df['close'].ewm(span=9, adjust=False).mean()
     df['EMA21'] = df['close'].ewm(span=21, adjust=False).mean()
     df['MACD'] = df['close'].ewm(span=12, adjust=False).mean() - df['close'].ewm(span=26, adjust=False).mean()
@@ -68,8 +71,20 @@ def calculate_indicators(df):
     df['BB_Std'] = df['close'].rolling(20).std()
     df['BB_Upper'] = df['BB_Mid'] + 2 * df['BB_Std']
     df['BB_Lower'] = df['BB_Mid'] - 2 * df['BB_Std']
-    df['ATR'] = df['high'].combine(df['low'], max) - df['low'].combine(df['close'].shift(), min)
+
+    # ATR
+    df['TR'] = np.maximum.reduce([
+        df['high'] - df['low'],
+        abs(df['high'] - df['close'].shift()),
+        abs(df['low'] - df['close'].shift())
+    ])
+    df['ATR14'] = df['TR'].rolling(14).mean()
+    df['ATR'] = df['ATR14']
+
+    # StochRSI
     df['StochRSI'] = (df['close'] - df['close'].rolling(14).min()) / (df['close'].rolling(14).max() - df['close'].rolling(14).min())
+
+    # Ichimoku
     df['Tenkan'] = (df['high'].rolling(9).max() + df['low'].rolling(9).min()) / 2
     df['Kijun'] = (df['high'].rolling(26).max() + df['low'].rolling(26).min()) / 2
     df['SenkouA'] = ((df['Tenkan'] + df['Kijun']) / 2).shift(26)
@@ -83,12 +98,6 @@ def calculate_indicators(df):
     df['RSI'] = 100 - (100 / (1 + rs))
 
     # ADX
-    df['TR'] = np.maximum.reduce([
-        df['high'] - df['low'],
-        abs(df['high'] - df['close'].shift()),
-        abs(df['low'] - df['close'].shift())
-    ])
-    df['ATR14'] = df['TR'].rolling(14).mean()
     df['+DM'] = np.where((df['high'].diff() > df['low'].diff()) & (df['high'].diff() > 0),
                          df['high'].diff(), 0)
     df['-DM'] = np.where((df['low'].diff() > df['high'].diff()) & (df['low'].diff() > 0),
@@ -109,6 +118,8 @@ def calculate_indicators(df):
 
 # ─── شناسایی کندل‌ها
 def detect_candlestick_patterns(df):
+    if len(df) < 3:
+        return []
     patterns = []
     open_, close, high, low = df['open'].iloc[-1], df['close'].iloc[-1], df['high'].iloc[-1], df['low'].iloc[-1]
     prev_open, prev_close = df['open'].iloc[-2], df['close'].iloc[-2]
@@ -125,36 +136,13 @@ def detect_candlestick_patterns(df):
     if abs(close - open_) / (high - low + 1e-9) < 0.1:
         patterns.append('Doji')
 
-    # الگوهای بیشتر
-    if p2_close < p2_open and abs(prev_close - prev_open) < (p2_open - p2_close)*0.3 and close > (p2_open + p2_close)/2:
-        patterns.append("Morning Star")
-    if p2_close > p2_open and abs(prev_close - prev_open) < (p2_close - p2_open)*0.3 and close < (p2_open + p2_close)/2:
-        patterns.append("Evening Star")
-    if (p2_close > p2_open and prev_close > prev_open and close > open_ and 
-        prev_close > p2_close and close > prev_close):
-        patterns.append("Three White Soldiers")
-    if (p2_close < p2_open and prev_close < prev_open and close < open_ and 
-        prev_close < p2_close and close < prev_close):
-        patterns.append("Three Black Crows")
-    if abs(high - df['high'].iloc[-2]) < 0.002*high:
-        patterns.append("Tweezer Top")
-    if abs(low - df['low'].iloc[-2]) < 0.002*low:
-        patterns.append("Tweezer Bottom")
-
     return patterns
-
-# ─── شناسایی Order Block ساده (فقط محاسبه، نه در پیام)
-def detect_order_block(df):
-    recent = df[-5:]
-    blocks = []
-    threshold = df['close'].std() * 1.5
-    for i in range(len(recent) - 1):
-        if abs(recent['close'].iloc[i] - recent['open'].iloc[i]) > threshold:
-            blocks.append((recent['low'].iloc[i], recent['high'].iloc[i]))
-    return blocks
 
 # ─── بررسی سیگنال و شروط
 def check_signal(df, symbol, change):
+    if len(df) < 60:
+        return None
+
     price = df['close'].iloc[-1]
     trend = 'neutral'
     if price > df['SenkouA'].iloc[-1] and price > df['SenkouB'].iloc[-1]:
@@ -163,31 +151,33 @@ def check_signal(df, symbol, change):
         trend = 'bearish'
 
     patterns = detect_candlestick_patterns(df)
-    detect_order_block(df)  # فقط محاسبه، ولی استفاده نمیشه
 
     # شروط
     stars = []
     if df['volume'].iloc[-1] > df['volume'].rolling(20).mean().iloc[-1] * 1.5: stars.append('🔹')
-    if df['StochRSI'].iloc[-1] > 0.8 if trend == 'bearish' else df['StochRSI'].iloc[-1] < 0.2: stars.append('🔹')
     if df['ATR'].iloc[-1] > df['ATR'].rolling(14).mean().iloc[-1]: stars.append('🔹')
-    if df['RSI'].iloc[-1] < 30 or df['RSI'].iloc[-1] > 70: stars.append("🔹")
     if df['ADX'].iloc[-1] > 25: stars.append("🔹")
-    if df['SuperTrend'].iloc[-1] != 0: stars.append("🔹")
     if patterns: stars.append('🔹')
 
     signal_type = None
     entry = tp = stop = size = None
+    atr = df['ATR14'].iloc[-1]
 
-    if change >= 1 and trend == 'bullish' and len(stars) >= 2:
+    if (change >= 1 and trend == 'bullish' and len(stars) >= 3 
+        and df['EMA9'].iloc[-1] > df['EMA21'].iloc[-1] 
+        and df['RSI'].iloc[-1] > 50):
         signal_type = 'LONG'
         entry = price
-        tp = price * 1.01
-        stop = price * 0.995
-    elif change <= -1 and trend == 'bearish' and len(stars) >= 2:
+        stop = price - 1.5 * atr
+        tp = price + 2 * atr
+
+    elif (change <= -1 and trend == 'bearish' and len(stars) >= 3 
+          and df['EMA9'].iloc[-1] < df['EMA21'].iloc[-1] 
+          and df['RSI'].iloc[-1] < 50):
         signal_type = 'SHORT'
         entry = price
-        tp = price * 0.99
-        stop = price * 1.005
+        stop = price + 1.5 * atr
+        tp = price - 2 * atr
 
     if signal_type and entry and stop:
         size = calculate_position_size(entry, stop)
@@ -239,11 +229,12 @@ def main():
 
                     tf_signals.append(signal)
 
-                if any(len(s['stars']) >= 2 for s in tf_signals):
+                # سیگنال معتبر فقط وقتی که حداقل ۲ تایم‌فریم همسو باشن
+                if len(tf_signals) >= 2 and all(s['type'] == tf_signals[0]['type'] for s in tf_signals):
                     alerts.append((symbol, tf_signals))
                     last_signal_time[symbol] = time.time()
 
-            # ارسال پیام تلگرام (هر سیگنال جداگانه)
+            # ارسال پیام تلگرام
             if alerts:
                 for symbol, sigs in alerts:
                     for s in sigs:
