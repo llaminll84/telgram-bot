@@ -8,19 +8,23 @@ from telegram import Bot
 from keep_alive import keep_alive  # سرور کوچک برای جلوگیری از خوابیدن کانتینر
 
 # ─── سرور کوچک
-keep_alive()  
+keep_alive()
 
 # ─── اطلاعات ربات تلگرام
 TELEGRAM_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 bot = Bot(token=TELEGRAM_TOKEN)
 
-bot.send_message(chat_id=CHAT_ID, text="✅ ربات با موفقیت راه‌اندازی شد!")
+# فقط یکبار اطلاع بده ربات بالا اومد (اگر می‌خوای می‌تونی این خطو کامنت کنی)
+try:
+    bot.send_message(chat_id=CHAT_ID, text="✅ ربات با موفقیت راه‌اندازی شد!")
+except Exception as e:
+    print(f"[WARN] ارسال پیام شروع ربات با خطا مواجه شد: {e}")
 
 exchange = ccxt.kucoin()
 
 TOP_N = 80
-TIMEFRAMES = ['5m','15m','30m','1h','4h']
+TIMEFRAMES = ['5m', '15m', '30m', '1h', '4h']
 last_signal_time = {}
 last_alerts = {}  # برای جلوگیری از سیگنال تکراری
 
@@ -40,27 +44,41 @@ def calculate_position_size(entry, stop):
 
 # ─── گرفتن ۸۰ ارز برتر
 def get_top_symbols():
-    tickers = exchange.fetch_tickers()
+    try:
+        tickers = exchange.fetch_tickers()
+    except Exception as e:
+        print(f"[ERROR] fetch_tickers failed: {e}")
+        return []
     symbols = []
     for symbol, data in tickers.items():
-        if symbol.endswith('/USDT'):
-            symbols.append({
-                'symbol': symbol,
-                'volume': data['quoteVolume'],
-                'change': data['percentage']
-            })
+        # بعضی تیکرها ممکنه داده کامل نداشته باشن => دفاعی عمل می‌کنیم
+        try:
+            if symbol.endswith('/USDT'):
+                vol = data.get('quoteVolume') if isinstance(data, dict) else data['quoteVolume']
+                ch = data.get('percentage') if isinstance(data, dict) else data['percentage']
+                symbols.append({
+                    'symbol': symbol,
+                    'volume': vol if vol is not None else 0,
+                    'change': ch if ch is not None else 0
+                })
+        except Exception:
+            continue
     symbols.sort(key=lambda x: x['volume'], reverse=True)
     return symbols[:TOP_N]
 
 # ─── گرفتن داده OHLCV
-def get_ohlcv_df(symbol, timeframe):
-    ohlcv = exchange.fetch_ohlcv(symbol, timeframe)
-    df = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
-    return df
+def get_ohlcv_df(symbol, timeframe, limit=200):
+    try:
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        df = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
+        return df
+    except Exception as e:
+        print(f"[ERROR] fetch_ohlcv {symbol} {timeframe}: {e}")
+        return pd.DataFrame()  # دیتا خالی
 
 # ─── اندیکاتورها
 def calculate_indicators(df):
-    if len(df) < 60:   # جلوگیری از خطا در دیتای کم
+    if df is None or len(df) < 60:   # جلوگیری از خطا در دیتای کم
         return df
 
     df['EMA9'] = df['close'].ewm(span=9, adjust=False).mean()
@@ -82,7 +100,7 @@ def calculate_indicators(df):
     df['ATR'] = df['ATR14']
 
     # StochRSI
-    df['StochRSI'] = (df['close'] - df['close'].rolling(14).min()) / (df['close'].rolling(14).max() - df['close'].rolling(14).min())
+    df['StochRSI'] = (df['close'] - df['close'].rolling(14).min()) / (df['close'].rolling(14).max() - df['close'].rolling(14).min() + 1e-9)
 
     # Ichimoku
     df['Tenkan'] = (df['high'].rolling(9).max() + df['low'].rolling(9).min()) / 2
@@ -97,17 +115,19 @@ def calculate_indicators(df):
     rs = gain / (loss + 1e-9)
     df['RSI'] = 100 - (100 / (1 + rs))
 
-    # ADX
+    # ADX (ساده)
     df['+DM'] = np.where((df['high'].diff() > df['low'].diff()) & (df['high'].diff() > 0),
                          df['high'].diff(), 0)
     df['-DM'] = np.where((df['low'].diff() > df['high'].diff()) & (df['low'].diff() > 0),
                          df['low'].diff(), 0)
-    df['+DI'] = 100 * (df['+DM'].ewm(alpha=1/14).mean() / df['ATR14'])
-    df['-DI'] = 100 * (df['-DM'].ewm(alpha=1/14).mean() / df['ATR14'])
+    # دفاع در برابر تقسیم بر صفر
+    atr14 = df['ATR14'].replace(0, np.nan)
+    df['+DI'] = 100 * (df['+DM'].ewm(alpha=1/14).mean() / (atr14))
+    df['-DI'] = 100 * (df['-DM'].ewm(alpha=1/14).mean() / (atr14))
     df['DX'] = (abs(df['+DI'] - df['-DI']) / (df['+DI'] + df['-DI'] + 1e-9)) * 100
     df['ADX'] = df['DX'].ewm(alpha=1/14).mean()
 
-    # SuperTrend
+    # SuperTrend (ساده)
     factor = 3
     hl2 = (df['high'] + df['low']) / 2
     df['UpperBand'] = hl2 + (factor * df['ATR14'])
@@ -118,7 +138,7 @@ def calculate_indicators(df):
 
 # ─── شناسایی کندل‌ها
 def detect_candlestick_patterns(df):
-    if len(df) < 3:
+    if df is None or len(df) < 3:
         return []
     patterns = []
     open_, close, high, low = df['open'].iloc[-1], df['close'].iloc[-1], df['high'].iloc[-1], df['low'].iloc[-1]
@@ -138,67 +158,90 @@ def detect_candlestick_patterns(df):
 
     return patterns
 
-# ─── بررسی سیگنال و شروط
+# ─── بررسی سیگنال و شروط (آستانه‌ها کمی شل‌تر شدند)
 def check_signal(df, symbol, change):
-    if len(df) < 60:
+    try:
+        if df is None or len(df) < 60:
+            # دیتا کافی نیست
+            # print(f"[DEBUG] {symbol}: not enough bars ({len(df) if df is not None else 0})")
+            return None
+
+        # اگر فیلدهای کلیدی NaN هستن، رد کن
+        needed = ['EMA9','EMA21','ATR14','RSI','ADX','volume']
+        if any(col not in df.columns or pd.isna(df[col].iloc[-1]) for col in needed):
+            # print(f"[DEBUG] {symbol}: NaN in indicators")
+            return None
+
+        price = df['close'].iloc[-1]
+        trend = 'neutral'
+        if not pd.isna(df['SenkouA'].iloc[-1]) and not pd.isna(df['SenkouB'].iloc[-1]):
+            if price > df['SenkouA'].iloc[-1] and price > df['SenkouB'].iloc[-1]:
+                trend = 'bullish'
+            elif price < df['SenkouA'].iloc[-1] and price < df['SenkouB'].iloc[-1]:
+                trend = 'bearish'
+
+        patterns = detect_candlestick_patterns(df)
+
+        # شروط ستاره‌ها — شُل‌تر از قبل
+        stars = []
+        vol_mean = df['volume'].rolling(20).mean().iloc[-1]
+        if not pd.isna(vol_mean) and df['volume'].iloc[-1] > vol_mean * 1.2:
+            stars.append('🔹')   # حجم بالاتر از 1.2 * mean(20)
+        if df['ATR'].iloc[-1] > df['ATR'].rolling(14).mean().iloc[-1]:
+            stars.append('🔹')
+        if df['ADX'].iloc[-1] > 20:   # قبلاً 25
+            stars.append('🔹')
+        if patterns:
+            stars.append('🔹')
+
+        signal_type = None
+        entry = tp = stop = size = None
+        atr = df['ATR14'].iloc[-1]
+
+        # لاگ وضعیت (کم‌حجم)
+        print(f"[LOG] {symbol} | Change={change:.2f}% | Trend={trend} | RSI={df['RSI'].iloc[-1]:.1f} | Stars={len(stars)} | EMA9={df['EMA9'].iloc[-2]:.2f}/{df['EMA9'].iloc[-1]:.2f} | EMA21={df['EMA21'].iloc[-1]:.2f} | ATR={atr:.4f}")
+
+        # شرایط ورود — کمی نرم‌تر
+        # از 1% --> 0.2% کاهش دادم
+        if (change >= 0.2 and trend == 'bullish' and len(stars) >= 2
+            and df['EMA9'].iloc[-1] > df['EMA21'].iloc[-1]
+            and df['RSI'].iloc[-1] > 48):
+            signal_type = 'LONG'
+            entry = price
+            stop = price - 1.2 * atr
+            tp = price + 1.8 * atr
+
+        elif (change <= -0.2 and trend == 'bearish' and len(stars) >= 2
+              and df['EMA9'].iloc[-1] < df['EMA21'].iloc[-1]
+              and df['RSI'].iloc[-1] < 52):
+            signal_type = 'SHORT'
+            entry = price
+            stop = price + 1.2 * atr
+            tp = price - 1.8 * atr
+
+        if signal_type and entry and stop:
+            size = calculate_position_size(entry, stop)
+
+        # جلوگیری از تکرار
+        prev = last_alerts.get(symbol)
+        if prev and prev["type"] == signal_type:
+            return None
+
+        if signal_type:
+            last_alerts[symbol] = {"type": signal_type, "time": time.time()}
+
+        return {
+            'entry': entry,
+            'tp': tp,
+            'stop': stop,
+            'type': signal_type,
+            'patterns': patterns,
+            'stars': stars,
+            'size': size
+        }
+    except Exception as e:
+        print(f"[ERROR] check_signal {symbol}: {e}")
         return None
-
-    price = df['close'].iloc[-1]
-    trend = 'neutral'
-    if price > df['SenkouA'].iloc[-1] and price > df['SenkouB'].iloc[-1]:
-        trend = 'bullish'
-    elif price < df['SenkouA'].iloc[-1] and price < df['SenkouB'].iloc[-1]:
-        trend = 'bearish'
-
-    patterns = detect_candlestick_patterns(df)
-
-    # شروط
-    stars = []
-    if df['volume'].iloc[-1] > df['volume'].rolling(20).mean().iloc[-1] * 1.5: stars.append('🔹')
-    if df['ATR'].iloc[-1] > df['ATR'].rolling(14).mean().iloc[-1]: stars.append('🔹')
-    if df['ADX'].iloc[-1] > 25: stars.append("🔹")
-    if patterns: stars.append('🔹')
-
-    signal_type = None
-    entry = tp = stop = size = None
-    atr = df['ATR14'].iloc[-1]
-
-    if (change >= 1 and trend == 'bullish' and len(stars) >= 3 
-        and df['EMA9'].iloc[-1] > df['EMA21'].iloc[-1] 
-        and df['RSI'].iloc[-1] > 50):
-        signal_type = 'LONG'
-        entry = price
-        stop = price - 1.5 * atr
-        tp = price + 2 * atr
-
-    elif (change <= -1 and trend == 'bearish' and len(stars) >= 3 
-          and df['EMA9'].iloc[-1] < df['EMA21'].iloc[-1] 
-          and df['RSI'].iloc[-1] < 50):
-        signal_type = 'SHORT'
-        entry = price
-        stop = price + 1.5 * atr
-        tp = price - 2 * atr
-
-    if signal_type and entry and stop:
-        size = calculate_position_size(entry, stop)
-
-    # جلوگیری از تکرار
-    prev = last_alerts.get(symbol)
-    if prev and prev["type"] == signal_type:
-        return None
-
-    if signal_type:
-        last_alerts[symbol] = {"type": signal_type, "time": time.time()}
-
-    return {
-        'entry': entry,
-        'tp': tp,
-        'stop': stop,
-        'type': signal_type,
-        'patterns': patterns,
-        'stars': stars,
-        'size': size
-    }
 
 # ─── تابع اصلی ربات
 def main():
@@ -211,10 +254,13 @@ def main():
             for symbol_data in top_symbols:
                 symbol = symbol_data['symbol']
                 tf_signals = []
+                tf_names = []
 
                 for tf in TIMEFRAMES:
                     try:
                         df = get_ohlcv_df(symbol, tf)
+                        if df is None or df.empty:
+                            continue
                         df = calculate_indicators(df)
                         signal = check_signal(df, symbol, symbol_data['change'])
                         if not signal:
@@ -223,16 +269,29 @@ def main():
                         print(f"[ERROR] {symbol} | TF: {tf} | {e}")
                         continue
 
-                    # لاگ کامل همه ارزها
+                    # لاگ کامل همه ارزها (اگر سیگنالی بود)
                     print(f"[LOG] {symbol} | TF: {tf} | Close: {df['close'].iloc[-1]:.4f} | "
                           f"Change: {symbol_data['change']:.2f}% | Signal: {signal['type']} | Stars: {''.join(signal['stars'])}")
 
                     tf_signals.append(signal)
+                    tf_names.append(tf)
 
-                # سیگنال معتبر فقط وقتی که حداقل ۲ تایم‌فریم همسو باشن
-                if len(tf_signals) >= 2 and all(s['type'] == tf_signals[0]['type'] for s in tf_signals):
-                    alerts.append((symbol, tf_signals))
-                    last_signal_time[symbol] = time.time()
+                # منطق همگرایی تایم‌فریم‌ها (نرم‌تر)
+                if tf_signals:
+                    types = [s['type'] for s in tf_signals if s['type']]
+                    if not types:
+                        continue
+                    # جهت غالب
+                    most_common = max(set(types), key=types.count)
+                    # آیا تایم‌فریم بزرگتر همسو هست؟
+                    high_tf_ok = any((tf in ['30m', '1h', '4h']) and (s['type'] == most_common) for tf, s in zip(tf_names, tf_signals))
+                    same_count = types.count(most_common)
+                    # شرط: یا یک تایم‌فریم بزرگتر همسو باشه، یا حداقل ۲ سیگنال هم‌جهت وجود داشته باشه
+                    if high_tf_ok or same_count >= 2:
+                        # فقط سیگنال‌هایی که با جهت غالب همخوانی دارن رو بفرست
+                        matched = [s for s in tf_signals if s['type'] == most_common]
+                        alerts.append((symbol, matched))
+                        last_signal_time[symbol] = time.time()
 
             # ارسال پیام تلگرام
             if alerts:
@@ -255,7 +314,10 @@ def main():
                                f"Conditions: {''.join(s['stars'])}\n"
                                f"🕒 Time: {now_time}")
 
-                        bot.send_message(chat_id=CHAT_ID, text=msg)
+                        try:
+                            bot.send_message(chat_id=CHAT_ID, text=msg)
+                        except Exception as e:
+                            print(f"[ERROR] send telegram {symbol}: {e}")
 
             print("⏳ صبر برای ۵ دقیقه بعدی ...\n")
             time.sleep(300)
