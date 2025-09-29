@@ -15,12 +15,6 @@ TELEGRAM_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 bot = Bot(token=TELEGRAM_TOKEN)
 
-# دفاعی: اگر ارسال پیام startup خطا داد، فقط لاگ کن
-try:
-    bot.send_message(chat_id=CHAT_ID, text="✅ ربات با موفقیت راه‌اندازی شد!")
-except Exception as e:
-    print(f"[WARN] ارسال پیام شروع با خطا: {e}")
-
 exchange = ccxt.kucoin()
 
 # ─── ====== CONFIG: اینها رو میتونی تغییر بدی ======
@@ -86,6 +80,82 @@ def get_ohlcv_df(symbol, timeframe, limit=200):
         print(f"[ERROR] fetch_ohlcv {symbol} {timeframe}: {e}")
         return pd.DataFrame()
 
+# ─── اندیکاتورهای تکمیلی: Pivot, OBV, VWAP, Fibonacci
+
+def calculate_pivot_points(df):
+    try:
+        df['Pivot'] = (df['high'] + df['low'] + df['close']) / 3
+        df['R1'] = 2*df['Pivot'] - df['low']
+        df['S1'] = 2*df['Pivot'] - df['high']
+        df['R2'] = df['Pivot'] + (df['high'] - df['low'])
+        df['S2'] = df['Pivot'] - (df['high'] - df['low'])
+        df['R3'] = df['high'] + 2*(df['Pivot']-df['low'])
+        df['S3'] = df['low'] - 2*(df['high']-df['Pivot'])
+    except Exception:
+        # در صورت بروز خطا، ستون‌ها اضافه نمیشن اما تابع ادامه پیدا میکنه
+        pass
+    return df
+
+
+def calculate_obv(df):
+    try:
+        obv = [0]
+        for i in range(1, len(df)):
+            if df['close'].iloc[i] > df['close'].iloc[i-1]:
+                obv.append(obv[-1] + df['volume'].iloc[i])
+            elif df['close'].iloc[i] < df['close'].iloc[i-1]:
+                obv.append(obv[-1] - df['volume'].iloc[i])
+            else:
+                obv.append(obv[-1])
+        df['OBV'] = obv
+    except Exception:
+        df['OBV'] = np.nan
+    return df
+
+
+def calculate_vwap(df):
+    try:
+        typical = (df['high'] + df['low'] + df['close']) / 3.0
+        cum_vol_price = (typical * df['volume']).cumsum()
+        cum_vol = df['volume'].cumsum()
+        df['VWAP'] = cum_vol_price / (cum_vol.replace(0, np.nan))
+    except Exception:
+        df['VWAP'] = np.nan
+    return df
+
+
+def calculate_fibonacci(df, lookback=20):
+    try:
+        swing_high = df['high'].iloc[-lookback:].max()
+        swing_low = df['low'].iloc[-lookback:].min()
+        diff = swing_high - swing_low if swing_high != swing_low else 0.0
+
+        levels = {
+            'fib_0': swing_high,
+            'fib_0.236': swing_high - 0.236 * diff,
+            'fib_0.382': swing_high - 0.382 * diff,
+            'fib_0.5': swing_high - 0.5 * diff,
+            'fib_0.618': swing_high - 0.618 * diff,
+            'fib_0.786': swing_high - 0.786 * diff,
+            'fib_1': swing_low,
+            'fib_1.618': swing_high + 0.618 * diff,
+            'fib_2.618': swing_high + 1.618 * diff,
+        }
+        for k, v in levels.items():
+            df[k] = v
+    except Exception:
+        # اگر داده کافی نیست، ستون‌ها را با NaN پر کن
+        df['fib_0'] = np.nan
+        df['fib_0.236'] = np.nan
+        df['fib_0.382'] = np.nan
+        df['fib_0.5'] = np.nan
+        df['fib_0.618'] = np.nan
+        df['fib_0.786'] = np.nan
+        df['fib_1'] = np.nan
+        df['fib_1.618'] = np.nan
+        df['fib_2.618'] = np.nan
+    return df
+
 # ─── اندیکاتورها (همون نسخهٔ قبلی)
 def calculate_indicators(df):
     if df is None or len(df) < 60:
@@ -143,6 +213,13 @@ def calculate_indicators(df):
     df['LowerBand'] = hl2 - (factor * df['ATR14'])
     df['SuperTrend'] = np.where(df['close'] > df['UpperBand'], 1,
                                 np.where(df['close'] < df['LowerBand'], -1, 0))
+
+    # ─── اضافه کردن اندیکاتورهای جدید بدون تغییر ساختار
+    df = calculate_pivot_points(df)
+    df = calculate_obv(df)
+    df = calculate_vwap(df)
+    df = calculate_fibonacci(df)
+
     return df
 
 # ─── شناسایی کندل‌ها
