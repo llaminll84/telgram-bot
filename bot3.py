@@ -82,7 +82,6 @@ def safe_fetch_ohlcv(symbol, timeframe, limit=200):
             print(f"[WARN] fetch_ohlcv {symbol} {timeframe} failed (retry {i+1}): {e}")
             time.sleep(1 + i * 2)
     return None
-
 # ─── گرفتن TOP symbols با اطلاعات حجم 24h
 def get_top_symbols():
     tickers = safe_fetch_tickers()
@@ -182,7 +181,6 @@ def calculate_indicators(df):
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
 
     return df
-
 # ─── اندیکاتورهای تکمیلی: Pivot, OBV, VWAP, Fibonacci
 
 def calculate_pivot_points(df):
@@ -270,7 +268,6 @@ def detect_candlestick_patterns(df):
         patterns.append('Doji')
 
     return patterns
-
 # ===== واگرایی خودکار (RSI/MACD) =====
 
 def find_local_extrema(series, order=3, kind='min'):
@@ -320,7 +317,6 @@ def detect_divergence(df, indicator='RSI', lookback=DIVERGENCE_LOOKBACK, order=D
     except Exception as e:
         print(f"[WARN] detect_divergence failed: {e}")
         return None
-
 # ===== بررسی تایم‌فریم بالاتر برای تأیید =====
 
 def confirm_high_tf(symbol, tf_low, required_type, high_tfs=HIGH_TFS):
@@ -442,8 +438,6 @@ def detect_volume_spike(symbol, current_vol):
     except Exception as e:
         print(f"[WARN] detect_volume_spike error {symbol}: {e}")
         return False
-
-
 # ===== تابع امتیازدهی (همون قبلی بدون تغییر منطقی) =====
 def compute_signal_score(sig, df, intrabar_change):
     try:
@@ -566,9 +560,7 @@ def check_signal(df, symbol, change):
     except Exception as e:
         print(f"[ERROR] check_signal {symbol}: {e}")
         return None
-
 # ===== main loop: جمع‌آوری کاندیدها + فیلتر پیشرفته + اسپایک حجم =====
-
 def main():
     print("🚀 ربات شروع شد — با تایید TF بالا و واگرایی")
     while True:
@@ -656,26 +648,16 @@ def main():
                     strength_tag = " 🔥" if s.get('strength') == 'strong' else (" ⭐" if s.get('strength') == 'normal' else "")
                     vol_tag = " 📈VOLSpike" if spike else ""
                     now_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    msg = (f"🚨 Multi-Coin Alert 🚨
-"
-                           f"{color_emoji} {sym} | TF: {tf}{strength_tag}{vol_tag}
-"
-                           f"Type: {s['type']}
-"
-                           f"Entry: {s['entry']:.6f}
-"
-                           f"TP: {s['tp']:.6f}
-"
-                           f"Stop: {s['stop']:.6f}
-"
-                           f"Size: {s['size']}
-"
-                           f"Score: {s.get('score', 0.0)}
-"
-                           f"Patterns: {s['patterns']}
-"
-                           f"Divergence: {s.get('divergence')}
-"
+                    msg = (f"🚨 Multi-Coin Alert 🚨\n"
+                           f"{color_emoji} {sym} | TF: {tf}{strength_tag}{vol_tag}\n"
+                           f"Type: {s['type']}\n"
+                           f"Entry: {s['entry']:.6f}\n"
+                           f"TP: {s['tp']:.6f}\n"
+                           f"Stop: {s['stop']:.6f}\n"
+                           f"Size: {s['size']}\n"
+                           f"Score: {s.get('score', 0.0)}\n"
+                           f"Patterns: {s['patterns']}\n"
+                           f"Divergence: {s.get('divergence')}\n"
                            f"🕒 Time: {now_time}")
                     try:
                         bot.send_message(chat_id=CHAT_ID, text=msg)
