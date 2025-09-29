@@ -17,9 +17,10 @@ bot = Bot(token=TELEGRAM_TOKEN)
 
 # دفاعی: اگر ارسال پیام startup خطا داد، فقط لاگ کن
 try:
-bot.send_message(chat_id=CHAT_ID, text="✅ ربات با موفقیت راه‌اندازی شد!")
+    bot.send_message(chat_id=CHAT_ID, text="✅ ربات با موفقیت راه‌اندازی شد!")
 except Exception as e:
-print(f"[WARN] ارسال پیام شروع با خطا: {e}")
+    print(f"[WARN] ارسال پیام شروع با خطا: {e}")
+
 
 exchange = ccxt.kucoin()
 
