@@ -1,6 +1,7 @@
 # paste this entire file, replace your current bot file
 import time
 import os
+import json
 import ccxt
 import pandas as pd
 import numpy as np
@@ -8,38 +9,43 @@ import datetime
 import logging
 from collections import deque
 from telegram import Bot
-from keep_alive import keep_alive  # سرور کوچک برای جلوگیری از خوابیدن کانتینر
+from keep_alive import keep_alive  # small server to keep container alive
 
-# ─── تنظیمات لاگ
-logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(message)s')
+# ------------------ LOG --------------------------------
+logging.basicConfig(level=logging.INFO, format='[%(levelname)s] %(asctime)s | %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 
-# ─── سرور کوچک
+# ------------------ KEEP ALIVE -------------------------
 keep_alive()
 
-# ─── اطلاعات ربات تلگرام (در صورت نبودن، ارسال تلگرام غیرفعال می‌شود)
+# ------------------ TELEGRAM ---------------------------
 TELEGRAM_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 if TELEGRAM_TOKEN and CHAT_ID:
     bot = Bot(token=TELEGRAM_TOKEN)
 else:
     bot = None
-    logging.warning("BOT_TOKEN یا CHAT_ID تنظیم نشده — ارسال پیام تلگرام غیرفعال است.")
+    logging.warning("BOT_TOKEN or CHAT_ID not set — Telegram notifications disabled.")
 
-# ─── صرافی (rate limit فعال)
+# ------------------ EXCHANGE ---------------------------
 exchange = ccxt.kucoin({'enableRateLimit': True})
 
-# ─── ====== CONFIG: اینها رو میتونی تغییر بدی ======
+# ------------------ CONFIG (TUNE THESE) ----------------
 TOP_N = 200
-TIMEFRAMES = ['5m','15m','30m','1h','4h']
-LOW_TF_TO_REQUIRE_HIGH_CONFIRM = ['5m','15m']
-HIGH_TFS = ['1h','4h']
-SIGNALS_PER_CYCLE = 3
-MIN_SCORE = 22.0
-MIN_SCORE_HIGH_CONFIRM = 12.0
-SEND_DELAY_BETWEEN_MSGS = 1.0
-SIGNAL_INTERVAL = 5 * 60
+TIMEFRAMES = ['5m', '15m', '30m', '1h', '4h']
+LOW_TF_TO_REQUIRE_HIGH_CONFIRM = ['5m', '15m']
+HIGH_TFS = ['1h', '4h']
 
-# دقت اضافه: سخت‌گیری‌های اختیاری
+SIGNALS_PER_CYCLE = 2           # max signals per cycle
+MIN_SCORE = 30.0                # minimum score to send
+MIN_SCORE_HIGH_CONFIRM = 18.0   # lower bar if high-TF confirmed
+SEND_DELAY_BETWEEN_MSGS = 1.0
+SIGNAL_INTERVAL = 5 * 60        # seconds cooldown per symbol
+
+# risk
+ACCOUNT_BALANCE = 1000.0
+RISK_PER_TRADE = 0.01           # 1% default
+
+# other params
 REQUIRE_DIVERGENCE = True
 DIVERGENCE_LOOKBACK = 60
 DIVERGENCE_ORDER = 3
@@ -50,38 +56,76 @@ ANOMALY_COOLDOWN = 60 * 60
 VOLUME_ZSCORE_THRESH = 2.0
 FAST_FILTER_CHANGE = 0.25
 
-# فیلترهای جدید برای دقت بالا
+# candle/vol settings
 CANDLE_BODY_MIN = 0.45
 CLOSE_POS_THRESHOLD = 0.65
 VOLUME_MULTIPLIER_CONFIRM = 1.3
 VOLATILITY_HIGH_THRESHOLD = 0.008
 REQUIRED_CONFIRMS_LOWVOL = 2
 REQUIRED_CONFIRMS_HIGHVOL = 3
-MONITOR_AFTER_SEND = False
-MONITOR_CANDLES = 6
-# ───────────────────────────────────────────────────
 
+# monitoring & learning
+MONITOR_AFTER_SEND = True
+MONITOR_CANDLES = 6             # how many next candles to check for TP/SL
+WEIGHTS_FILE = "weights.json"
+RESULTS_FILE = "results.json"
+
+# -------------------------------------------------------
+
+# state
 last_signal_time = {}
 last_alerts = {}
 volume_baseline = {}
 volume_last_alert = {}
 
-# ─── مدیریت ریسک ───
-ACCOUNT_BALANCE = 1000.0
-RISK_PER_TRADE = 0.01
+# default weights for factors used in compute_signal_score and adaptive learning
+DEFAULT_WEIGHTS = {
+    "stars": 6.0,
+    "adx": 0.6,
+    "intrabar": 6.0,
+    "volume_rel": 8.0,
+    "macd_hist": 8.0,
+    "ema_diff": 120.0,
+    "candle_strength": 10.0,
+    "vwap_bonus": 4.0,
+    "divergence": 6.0
+}
 
+# safe file helpers for weights and results
+def load_json_file(path, default):
+    try:
+        if os.path.exists(path):
+            with open(path, 'r') as f:
+                return json.load(f)
+    except Exception as e:
+        logging.warning(f"load_json_file {path} failed: {e}")
+    return default
+
+def save_json_file(path, data):
+    try:
+        with open(path, 'w') as f:
+            json.dump(data, f, indent=2, default=str)
+    except Exception as e:
+        logging.warning(f"save_json_file {path} failed: {e}")
+
+weights = load_json_file(WEIGHTS_FILE, DEFAULT_WEIGHTS.copy())
+results_db = load_json_file(RESULTS_FILE, {"history": []})
+
+# ------------------ RISK --------------------------------
 def calculate_position_size(entry, stop):
     try:
         risk_amount = ACCOUNT_BALANCE * RISK_PER_TRADE
         risk_per_unit = abs(entry - stop)
         if risk_per_unit == 0:
-            return 0
+            return 0.0
         position_size = risk_amount / risk_per_unit
-        return round(position_size, 3)
-    except Exception:
-        return 0
+        # round to reasonable precision
+        return float(round(position_size, 6))
+    except Exception as e:
+        logging.warning(f"calculate_position_size error: {e}")
+        return 0.0
 
-# ─── توابع امن fetch
+# ------------------ SAFE FETCH -------------------------
 def safe_fetch_tickers():
     for i in range(3):
         try:
@@ -110,7 +154,7 @@ def safe_fetch_ohlcv(symbol, timeframe, limit=200):
             time.sleep(1 + i * 2)
     return None
 
-# ─── گرفتن TOP symbols با اطلاعات حجم 24h (مقاوم‌تر)
+# ------------------ SYMBOLS ----------------------------
 def get_top_symbols():
     tickers = safe_fetch_tickers()
     symbols = []
@@ -128,7 +172,7 @@ def get_top_symbols():
     symbols.sort(key=lambda x: x['volume'] or 0.0, reverse=True)
     return symbols[:TOP_N]
 
-# ─── گرفتن داده OHLCV به صورت DataFrame
+# ------------------ OHLCV -> DataFrame -----------------
 def get_ohlcv_df(symbol, timeframe, limit=200):
     try:
         ohlcv = safe_fetch_ohlcv(symbol, timeframe, limit)
@@ -141,26 +185,25 @@ def get_ohlcv_df(symbol, timeframe, limit=200):
         logging.error(f"fetch_ohlcv {symbol} {timeframe}: {e}")
         return pd.DataFrame()
 
-# ─── اندیکاتورها
+# --------------- INDICATORS ----------------------------
 def calculate_indicators(df):
     if df is None or len(df) < 60:
         return df
-
     df = df.copy()
+    # EMA
     df['EMA9'] = df['close'].ewm(span=9, adjust=False).mean()
     df['EMA21'] = df['close'].ewm(span=21, adjust=False).mean()
     df['EMA50'] = df['close'].ewm(span=50, adjust=False).mean()
     df['EMA200'] = df['close'].ewm(span=200, adjust=False).mean()
-
+    # MACD
     df['MACD'] = df['close'].ewm(span=12, adjust=False).mean() - df['close'].ewm(span=26, adjust=False).mean()
     df['Signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
     df['MACD_HIST'] = df['MACD'] - df['Signal']
-
+    # Bollinger
     df['BB_Mid'] = df['close'].rolling(20).mean()
     df['BB_Std'] = df['close'].rolling(20).std()
     df['BB_Upper'] = df['BB_Mid'] + 2 * df['BB_Std']
     df['BB_Lower'] = df['BB_Mid'] - 2 * df['BB_Std']
-
     # ATR
     df['TR'] = np.maximum.reduce([
         df['high'] - df['low'],
@@ -169,24 +212,20 @@ def calculate_indicators(df):
     ])
     df['ATR14'] = df['TR'].rolling(14).mean()
     df['ATR'] = df['ATR14']
-
     # StochRSI
     df['StochRSI'] = (df['close'] - df['close'].rolling(14).min()) / (df['close'].rolling(14).max() - df['close'].rolling(14).min() + 1e-9)
-
-    # Ichimoku
+    # Ichimoku (light)
     df['Tenkan'] = (df['high'].rolling(9).max() + df['low'].rolling(9).min()) / 2
     df['Kijun'] = (df['high'].rolling(26).max() + df['low'].rolling(26).min()) / 2
     df['SenkouA'] = ((df['Tenkan'] + df['Kijun']) / 2).shift(26)
     df['SenkouB'] = ((df['high'].rolling(52).max() + df['low'].rolling(52).min()) / 2).shift(26)
-
     # RSI
     delta = df['close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
     rs = gain / (loss + 1e-9)
     df['RSI'] = 100 - (100 / (1 + rs))
-
-    # ADX (ساده)
+    # ADX (simple)
     df['+DM'] = np.where((df['high'].diff() > df['low'].diff()) & (df['high'].diff() > 0), df['high'].diff(), 0)
     df['-DM'] = np.where((df['low'].diff() > df['high'].diff()) & (df['low'].diff() > 0), df['low'].diff(), 0)
     atr14 = df['ATR14'].replace(0, np.nan)
@@ -194,24 +233,21 @@ def calculate_indicators(df):
     df['-DI'] = 100 * (pd.Series(df['-DM']).ewm(alpha=1/14).mean() / (atr14))
     df['DX'] = (abs(df['+DI'] - df['-DI']) / (df['+DI'] + df['-DI'] + 1e-9)) * 100
     df['ADX'] = df['DX'].ewm(alpha=1/14).mean()
-
-    # SuperTrend (ساده)
+    # SuperTrend (simple)
     factor = 3
     hl2 = (df['high'] + df['low']) / 2
     df['UpperBand'] = hl2 + (factor * df['ATR14'])
     df['LowerBand'] = hl2 - (factor * df['ATR14'])
     df['SuperTrend'] = np.where(df['close'] > df['UpperBand'], 1, np.where(df['close'] < df['LowerBand'], -1, 0))
-
-    # اندیکاتورهای جدید: Pivot, OBV, VWAP, Fibonacci
+    # extras
     df = calculate_pivot_points(df)
     df = calculate_obv(df)
     df = calculate_vwap(df)
     df = calculate_fibonacci(df)
-
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     return df
 
-# ─── اندیکاتورهای تکمیلی
+# --------------- helpers indicators -------------------
 def calculate_pivot_points(df):
     try:
         df['Pivot'] = (df['high'] + df['low'] + df['close']) / 3
@@ -273,14 +309,14 @@ def calculate_fibonacci(df, lookback=20):
             df[k] = np.nan
     return df
 
-# ─── شناسایی کندل‌ها
+# -------------- candlestick patterns -------------------
 def detect_candlestick_patterns(df):
     if df is None or len(df) < 3:
         return []
     patterns = []
     open_, close, high, low = df['open'].iloc[-1], df['close'].iloc[-1], df['high'].iloc[-1], df['low'].iloc[-1]
-    prev_open, prev_close = df['open'].iloc[-2], df['close'].iloc[-2]
-
+    prev_open, prev_close = df['open'].iloc[-2], df['close'].iloc[-2']
+    # (ادامه detect_candlestick_patterns)
     if prev_close < prev_open and close > open_ and close > prev_open and open_ < prev_close:
         patterns.append('Bullish Engulfing')
     if prev_close > prev_open and close < open_ and open_ > prev_close and close < prev_open:
@@ -293,7 +329,7 @@ def detect_candlestick_patterns(df):
         patterns.append('Doji')
     return patterns
 
-# ===== واگرایی خودکار (RSI/MACD) =====
+# ===== divergence (RSI/MACD) helpers =====
 def find_local_extrema(series, order=3, kind='min'):
     idx = []
     N = len(series)
@@ -332,7 +368,7 @@ def detect_divergence(df, indicator='RSI', lookback=DIVERGENCE_LOOKBACK, order=D
         logging.warning(f"detect_divergence failed: {e}")
         return None
 
-# ===== بررسی تایم‌فریم بالاتر برای تأیید =====
+# ===== confirm high TF =====
 def confirm_high_tf(symbol, tf_low, required_type, high_tfs=HIGH_TFS):
     try:
         for htf in high_tfs:
@@ -370,7 +406,7 @@ def confirm_high_tf(symbol, tf_low, required_type, high_tfs=HIGH_TFS):
         logging.warning(f"confirm_high_tf failed for {symbol}: {e}")
     return False
 
-# ===== محاسبهٔ اسپایک حجم با baseline ساده (EMA)
+# ===== volume baseline & spike detection =====
 def update_volume_baseline(symbol, current_vol):
     if symbol not in volume_baseline:
         volume_baseline[symbol] = float(current_vol or 0.0)
@@ -443,7 +479,7 @@ def detect_volume_spike_detailed(symbol, current_vol):
         volume_last_alert[symbol] = time.time()
         return True
 
-# === توابع کمکی جدید برای دقت بالا ===
+# ===== helpers for scoring and confirmation =====
 def candle_strength_metric(df):
     try:
         last = df.iloc[-1]
@@ -476,8 +512,8 @@ def candle_strength_metric(df):
 
 def volume_confirmation(df):
     try:
-        vol = df['volume'].iloc[-1]
-        mean20 = df['volume'].rolling(20).mean().iloc[-1]
+        vol = float(df['volume'].iloc[-1])
+        mean20 = float(df['volume'].rolling(20).mean().iloc[-1])
         if pd.isna(mean20) or mean20 == 0:
             return False, 1.0
         rel = vol / (mean20 + 1e-9)
@@ -495,46 +531,53 @@ def atr_volatility(df):
     except Exception:
         return 0.0
 
-# compute_signal_score (تقویت‌شده)
+# compute_signal_score (adaptive uses weights loaded from file)
 def compute_signal_score(sig, df, intrabar_change):
     try:
         base = 0.0
         stars_count = len(sig.get('stars', []))
-        base += stars_count * 6.0
+        base += stars_count * weights.get('stars', DEFAULT_WEIGHTS['stars'])
         adx = float(df['ADX'].iloc[-1]) if 'ADX' in df.columns and not pd.isna(df['ADX'].iloc[-1]) else 0.0
-        base += min(adx, 50.0) * 0.6
-        base += min(abs(intrabar_change) * 6.0, 25.0)
+        base += min(adx, 50.0) * weights.get('adx', DEFAULT_WEIGHTS['adx'])
+        base += min(abs(intrabar_change) * weights.get('intrabar', DEFAULT_WEIGHTS['intrabar']), 25.0)
         vol_mean = float(df['volume'].rolling(20).mean().iloc[-1]) if 'volume' in df.columns else np.nan
         vol_rel = 1.0
         if not pd.isna(vol_mean) and vol_mean > 0:
             vol_rel = float(df['volume'].iloc[-1]) / vol_mean
             if vol_rel > 1.0:
-                base += (vol_rel - 1.0) * 8.0
+                base += (vol_rel - 1.0) * weights.get('volume_rel', DEFAULT_WEIGHTS['volume_rel'])
         macd_hist = float(df['MACD_HIST'].iloc[-1]) if 'MACD_HIST' in df.columns and not pd.isna(df['MACD_HIST'].iloc[-1]) else 0.0
-        base += min(abs(macd_hist) * 8.0, 20.0)
+        base += min(abs(macd_hist) * weights.get('macd_hist', DEFAULT_WEIGHTS['macd_hist']), 20.0)
         ema9 = float(df['EMA9'].iloc[-1]) if 'EMA9' in df.columns and not pd.isna(df['EMA9'].iloc[-1]) else 0.0
         ema21 = float(df['EMA21'].iloc[-1]) if 'EMA21' in df.columns and not pd.isna(df['EMA21'].iloc[-1]) else 1.0
         ema_diff = (ema9 - ema21) / (ema21 if ema21 != 0 else 1e-9)
         if sig.get('type') == 'LONG':
-            base += max(0.0, ema_diff * 120.0)
+            base += max(0.0, ema_diff * weights.get('ema_diff', DEFAULT_WEIGHTS['ema_diff']))
         else:
-            base += max(0.0, -ema_diff * 120.0)
+            base += max(0.0, -ema_diff * weights.get('ema_diff', DEFAULT_WEIGHTS['ema_diff']))
         cs, ctype = candle_strength_metric(df)
-        base += cs * 10.0
+        base += cs * weights.get('candle_strength', DEFAULT_WEIGHTS['candle_strength'])
         if 'VWAP' in df.columns and not pd.isna(df['VWAP'].iloc[-1]):
             if (sig.get('type') == 'LONG' and df['close'].iloc[-1] > df['VWAP'].iloc[-1]) or \
                (sig.get('type') == 'SHORT' and df['close'].iloc[-1] < df['VWAP'].iloc[-1]):
-                base += 4.0
+                base += weights.get('vwap_bonus', DEFAULT_WEIGHTS['vwap_bonus'])
         rsi = float(df['RSI'].iloc[-1]) if 'RSI' in df.columns and not pd.isna(df['RSI'].iloc[-1]) else 50.0
+        # penalize extreme RSI
         if rsi > 85:
             base -= (rsi - 85) * 1.0
         if rsi < 15:
             base -= (15 - rsi) * 1.0
+        # divergence bonus
+        div_bonus = 0.0
+        if sig.get('divergence', {}).get('RSI') or sig.get('divergence', {}).get('MACD'):
+            div_bonus += weights.get('divergence', DEFAULT_WEIGHTS['divergence'])
+        base += div_bonus
         return round(base, 2)
-    except Exception:
+    except Exception as e:
+        logging.warning(f"compute_signal_score error: {e}")
         return 0.0
 
-# ===== بازنویسی check_signal با منطق قوی تر و لاگ دقیق =====
+# ===== check_signal (stronger logic) =====
 def check_signal(df, symbol, change):
     try:
         if df is None or len(df) < 60:
@@ -610,22 +653,27 @@ def check_signal(df, symbol, change):
         size = calculate_position_size(entry, stop)
         temp_sig = {'entry': entry, 'tp': tp, 'stop': stop, 'type': candidate_type,
                     'patterns': patterns, 'stars': confirm_reasons, 'size': size}
+        # compute divergence info
+        div_rsi = detect_divergence(df, indicator='RSI')
+        div_macd = detect_divergence(df, indicator='MACD')
+        temp_sig['divergence'] = {'RSI': div_rsi, 'MACD': div_macd}
+        # scoring
         score = compute_signal_score(temp_sig, df, intrabar_change)
         temp_sig['score'] = score
         temp_sig['confirm_reasons'] = confirm_reasons
         temp_sig['volatility'] = vol_ratio
-        div_rsi = detect_divergence(df, indicator='RSI')
-        div_macd = detect_divergence(df, indicator='MACD')
-        temp_sig['divergence'] = {'RSI': div_rsi, 'MACD': div_macd}
+        # strength
         if score >= (MIN_SCORE * 1.8):
             temp_sig['strength'] = 'strong'
         elif score >= MIN_SCORE:
             temp_sig['strength'] = 'normal'
         else:
             temp_sig['strength'] = 'weak'
+        # if below MIN_SCORE drop
         if temp_sig['score'] < MIN_SCORE:
             logging.debug(f"{symbol} score {temp_sig['score']} below MIN_SCORE {MIN_SCORE}")
             return None
+        # prevent rapid duplicates
         prev = last_alerts.get(symbol)
         if prev and prev.get('type') == candidate_type and (time.time() - prev.get('time', 0) < SIGNAL_INTERVAL):
             return None
@@ -636,117 +684,8 @@ def check_signal(df, symbol, change):
         logging.error(f"check_signal {symbol}: {e}")
         return None
 
-# ===== main loop =====
-def main():
-    logging.info("🚀 ربات شروع شد — نسخهٔ با دقت بالا")
-    while True:
-        try:
-            top_symbols = get_top_symbols()
-            candidates = []
-            for symbol_data in top_symbols:
-                symbol = symbol_data['symbol']
-                change = symbol_data.get('change', 0.0)
-                current_vol = symbol_data.get('volume', 0.0)
-                if abs(change) < FAST_FILTER_CHANGE:
-                    continue
-                high_confirmed = False
-                for htf in HIGH_TFS:
-                    df_ht = get_ohlcv_df(symbol, htf)
-                    if df_ht is None or df_ht.empty:
-                        continue
-                    df_ht = calculate_indicators(df_ht)
-                    sig_ht = check_signal(df_ht, symbol, change)
-                    if sig_ht:
-                        candidates.append({'symbol': symbol, 'tf': htf, 'signal': sig_ht, 'score': sig_ht.get('score', 0.0), 'df': df_ht, '24h_volume': current_vol})
-                        high_confirmed = True
-                if not high_confirmed:
-                    continue
-                for tf in [t for t in TIMEFRAMES if t not in HIGH_TFS]:
-                    df = get_ohlcv_df(symbol, tf)
-                    if df is None or df.empty:
-                        continue
-                    df = calculate_indicators(df)
-                    sig = check_signal(df, symbol, change)
-                    if sig:
-                        candidates.append({'symbol': symbol, 'tf': tf, 'signal': sig, 'score': sig.get('score', 0.0), 'df': df, '24h_volume': current_vol})
-            logging.info(f"[INFO] Found {len(candidates)} raw candidates this cycle.")
-            filtered = [c for c in candidates if c['score'] >= MIN_SCORE]
-            logging.info(f"[INFO] {len(filtered)} candidates passed MIN_SCORE >= {MIN_SCORE}")
-            filtered.sort(key=lambda x: x['score'], reverse=True)
-            final_candidates = []
-            used_symbols = set()
-            for c in filtered:
-                if len(final_candidates) >= SIGNALS_PER_CYCLE:
-                    break
-                sym = c['symbol']
-                tf = c['tf']
-                sig = c['signal']
-                df = c['df']
-                last_t = last_signal_time.get(sym, 0)
-                if time.time() - last_t < SIGNAL_INTERVAL:
-                    continue
-                if sym in used_symbols:
-                    continue
-                if tf in LOW_TF_TO_REQUIRE_HIGH_CONFIRM:
-                    confirmed = confirm_high_tf(sym, tf, sig['type'])
-                    div_ok = (sig.get('divergence', {}) is not None and (sig.get('divergence', {}).get('RSI') or sig.get('divergence', {}).get('MACD')))
-                    if REQUIRE_DIVERGENCE:
-                        if not (confirmed or div_ok):
-                            continue
-                    else:
-                        if not confirmed:
-                            continue
-                final_candidates.append(c)
-                used_symbols.add(sym)
-                last_signal_time[sym] = time.time()
-            logging.info(f"[INFO] Selected {len(final_candidates)} signals to send (max {SIGNALS_PER_CYCLE}).")
-            if final_candidates:
-                for c in final_candidates:
-                    sym = c['symbol']
-                    vol24 = c.get('24h_volume', 0.0)
-                    spike = detect_volume_spike_detailed(sym, vol24)
-                    c['volume_spike'] = spike
-            if final_candidates:
-                for c in final_candidates:
-                    s = c['signal']
-                    sym = c['symbol']
-                    tf = c['tf']
-                    spike = c.get('volume_spike', False)
-                    color_emoji = "🟢" if s['type'] == "LONG" else "🔴"
-                    strength_tag = " 🔥" if s.get('strength') == 'strong' else (" ⭐" if s.get('strength') == 'normal' else "")
-                    vol_tag = " 📈VOLSpike" if spike else ""
-                    now_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    msg = (f"🚨 Multi-Coin Alert 🚨\n"
-                           f"{color_emoji} {sym} | TF: {tf}{strength_tag}{vol_tag}\n"
-                           f"Type: {s['type']}\n"
-                           f"Entry: {s['entry']:.6f}\n"
-                           f"TP: {s['tp']:.6f}\n"
-                           f"Stop: {s['stop']:.6f}\n"
-                           f"Size: {s['size']}\n"
-                           f"Score: {s.get('score', 0.0)}\n"
-                           f"Confirms: {s.get('confirm_reasons')}\n"
-                           f"Volatility: {s.get('volatility'):.4f}\n"
-                           f"Divergence: {s.get('divergence')}\n"
-                           f"🕒 Time: {now_time}")
-                    try:
-                        if bot:
-                            bot.send_message(chat_id=CHAT_ID, text=msg)
-                        logging.info(f"[SENT] {sym} | TF:{tf} | Score:{s.get('score',0)} | VOLSPIKE={spike}")
-                    except Exception as e:
-                        logging.error(f"sending telegram {sym}: {e}")
-                    if MONITOR_AFTER_SEND:
-                        try:
-                            monitor_signal_outcome(sym, tf, s['entry'], s['tp'], s['stop'], MONITOR_CANDLES)
-                        except Exception as e:
-                            logging.warning(f"monitoring failed for {sym}: {e}")
-                    time.sleep(SEND_DELAY_BETWEEN_MSGS)
-            time.sleep(SIGNAL_INTERVAL)
-        except Exception as e:
-            logging.error(f"خطا در main: {e}")
-            time.sleep(30)
-
-# مانیتور کوتاه (اختیاری)
-def monitor_signal_outcome(symbol, timeframe, entry, tp, stop, look_candles=6):
+# ===== monitoring outcome & adaptive learning =====
+def monitor_signal_outcome(symbol, timeframe, entry, tp, stop, look_candles=MONITOR_CANDLES):
     try:
         ohlcv = safe_fetch_ohlcv(symbol, timeframe, limit=look_candles)
         if not ohlcv:
@@ -769,5 +708,192 @@ def monitor_signal_outcome(symbol, timeframe, entry, tp, stop, look_candles=6):
         logging.warning(f"monitor_signal_outcome failed: {e}")
         return None
 
+def adapt_weights_on_result(entry_sig, df, result):
+    """
+    entry_sig: the signal dict that was sent
+    df: dataframe at time of signal (or latest)
+    result: {'tp': bool, 'stop': bool}
+    """
+    try:
+        # simple adaptive learning: if win -> reinforce used features; if lose -> penalize
+        delta = 0.05  # learning rate
+        # pick features to adjust based on confirm_reasons and indicators
+        reasons = entry_sig.get('confirm_reasons', []) or entry_sig.get('stars', [])
+        # if divergence existed, consider it strong
+        if entry_sig.get('divergence', {}).get('RSI') or entry_sig.get('divergence', {}).get('MACD'):
+            reasons = reasons + ['divergence']
+        # compute performance direction
+        win = result.get('tp', False) and not result.get('stop', False)
+        lose = result.get('stop', False) and not result.get('tp', False)
+        # fallback safe update
+        for r in reasons:
+            if r == 'rsi_long' or r == 'rsi_short':
+                key = 'adx'  # somewhat related
+            elif r.startswith('macd'):
+                key = 'macd_hist'
+            elif r.startswith('candle'):
+                key = 'candle_strength'
+            elif r == 'volume_spike':
+                key = 'volume_rel'
+            elif r == 'above_vwap':
+                key = 'vwap_bonus'
+            else:
+                key = 'stars'
+            # adjust
+            if win:
+                weights[key] = min(weights.get(key, DEFAULT_WEIGHTS.get(key, 1.0)) + delta, 500.0)
+            elif lose:
+                weights[key] = max(weights.get(key, DEFAULT_WEIGHTS.get(key, 1.0)) - delta, 0.0)
+        # small global tweak for ema_diff if overall failed
+        if lose:
+            weights['ema_diff'] = max(weights.get('ema_diff', DEFAULT_WEIGHTS['ema_diff']) - delta*2, 0.0)
+        if win:
+            weights['ema_diff'] = min(weights.get('ema_diff', DEFAULT_WEIGHTS['ema_diff']) + delta*2, 1000.0)
+        # save weights
+        save_json_file(WEIGHTS_FILE, weights)
+        logging.info(f"[LEARN] updated weights (win={win}, lose={lose})")
+    except Exception as e:
+        logging.warning(f"adapt_weights_on_result failed: {e}")
+
+# --------------- MAIN LOOP -----------------------------
+def main():
+    logging.info("🚀 PRO Bot started — high-accuracy mode")
+    while True:
+        try:
+            top_symbols = get_top_symbols()
+            candidates = []
+            # stage 1: quick filter by 24h change to reduce calls
+            for symbol_data in top_symbols:
+                symbol = symbol_data['symbol']
+                change = symbol_data.get('change', 0.0)
+                current_vol = symbol_data.get('volume', 0.0)
+                # fast filter
+                if abs(change) < FAST_FILTER_CHANGE:
+                    continue
+                # check high TF first
+                high_confirmed = False
+                for htf in HIGH_TFS:
+                    df_ht = get_ohlcv_df(symbol, htf)
+                    if df_ht is None or df_ht.empty:
+                        continue
+                    df_ht = calculate_indicators(df_ht)
+                    sig_ht = check_signal(df_ht, symbol, change)
+                    if sig_ht:
+                        candidates.append({'symbol': symbol, 'tf': htf, 'signal': sig_ht, 'score': sig_ht.get('score', 0.0), 'df': df_ht, '24h_volume': current_vol})
+                        high_confirmed = True
+                # if no high tf confirmation, skip low tf to be conservative
+                if not high_confirmed:
+                    continue
+                # check low TFs only if high tf confirmed
+                for tf in [t for t in TIMEFRAMES if t not in HIGH_TFS]:
+                    df = get_ohlcv_df(symbol, tf)
+                    if df is None or df.empty:
+                        continue
+                    df = calculate_indicators(df)
+                    sig = check_signal(df, symbol, change)
+                    if sig:
+                        candidates.append({'symbol': symbol, 'tf': tf, 'signal': sig, 'score': sig.get('score', 0.0), 'df': df, '24h_volume': current_vol})
+            logging.info(f"[INFO] Found {len(candidates)} raw candidates this cycle.")
+            # filter by score
+            filtered = [c for c in candidates if c['score'] >= MIN_SCORE]
+            logging.info(f"[INFO] {len(filtered)} candidates passed MIN_SCORE >= {MIN_SCORE}")
+            filtered.sort(key=lambda x: x['score'], reverse=True)
+            final_candidates = []
+            used_symbols = set()
+            for c in filtered:
+                if len(final_candidates) >= SIGNALS_PER_CYCLE:
+                    break
+                sym = c['symbol']
+                tf = c['tf']
+                sig = c['signal']
+                df = c['df']
+                last_t = last_signal_time.get(sym, 0)
+                if time.time() - last_t < SIGNAL_INTERVAL:
+                    continue
+                if sym in used_symbols:
+                    continue
+                # if low tf, require confirm or divergence
+                if tf in LOW_TF_TO_REQUIRE_HIGH_CONFIRM:
+                    confirmed = confirm_high_tf(sym, tf, sig['type'])
+                    div_ok = (sig.get('divergence', {}) is not None and (sig.get('divergence', {}).get('RSI') or sig.get('divergence', {}).get('MACD')))
+                    if REQUIRE_DIVERGENCE:
+                        if not (confirmed or div_ok):
+                            continue
+                    else:
+                        if not confirmed:
+                            continue
+                final_candidates.append(c)
+                used_symbols.add(sym)
+                last_signal_time[sym] = time.time()
+            logging.info(f"[INFO] Selected {len(final_candidates)} signals to send (max {SIGNALS_PER_CYCLE}).")
+            # heavy volume check for shortlisted
+            if final_candidates:
+                for c in final_candidates:
+                    sym = c['symbol']
+                    vol24 = c.get('24h_volume', 0.0)
+                    spike = detect_volume_spike_detailed(sym, vol24)
+                    c['volume_spike'] = spike
+            # send messages
+            if final_candidates:
+                for c in final_candidates:
+                    s = c['signal']
+                    sym = c['symbol']
+                    tf = c['tf']
+                    spike = c.get('volume_spike', False)
+                    color_emoji = "🟢" if s['type'] == "LONG" else "🔴"
+                    strength_tag = " 🔥" if s.get('strength') == 'strong' else (" ⭐" if s.get('strength') == 'normal' else "")
+                    vol_tag = " 📈VOLSpike" if spike else ""
+                    now_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    msg = (f"🚨 PRO Multi-Coin Alert 🚨\n"
+                           f"{color_emoji} {sym} | TF: {tf}{strength_tag}{vol_tag}\n"
+                           f"Type: {s['type']}\n"
+                           f"Entry: {s['entry']:.6f}\n"
+                           f"TP: {s['tp']:.6f}\n"
+                           f"Stop: {s['stop']:.6f}\n"
+                           f"Size: {s['size']}\n"
+                           f"Score: {s.get('score', 0.0)}\n"
+                           f"Confirms: {s.get('confirm_reasons')}\n"
+                           f"Volatility: {s.get('volatility'):.4f}\n"
+                           f"Divergence: {s.get('divergence')}\n"
+                           f"WeightsSnapshot: { {k: round(v,3) for k,v in weights.items()} }\n"
+                           f"🕒 Time: {now_time}")
+                    try:
+                        if bot:
+                            bot.send_message(chat_id=CHAT_ID, text=msg)
+                        logging.info(f"[SENT] {sym} | TF:{tf} | Score:{s.get('score',0)} | VOLSPIKE={spike}")
+                    except Exception as e:
+                        logging.error(f"sending telegram {sym}: {e}")
+                    # monitor outcome optionally and adapt
+                    if MONITOR_AFTER_SEND:
+                        try:
+                            res = monitor_signal_outcome(sym, tf, s['entry'], s['tp'], s['stop'], MONITOR_CANDLES)
+                            # record in results db
+                            record = {
+                                "time": now_time,
+                                "symbol": sym,
+                                "tf": tf,
+                                "type": s['type'],
+                                "entry": s['entry'],
+                                "tp": s['tp'],
+                                "stop": s['stop'],
+                                "score": s.get('score'),
+                                "confirms": s.get('confirm_reasons'),
+                                "result": res
+                            }
+                            results_db.get("history", []).append(record)
+                            save_json_file(RESULTS_FILE, results_db)
+                            # adapt weights
+                            if res:
+                                adapt_weights_on_result(s, c['df'], res)
+                        except Exception as e:
+                            logging.warning(f"monitoring/adapt failed for {sym}: {e}")
+                    time.sleep(SEND_DELAY_BETWEEN_MSGS)
+            # sleep until next cycle
+            time.sleep(SIGNAL_INTERVAL)
+        except Exception as e:
+            logging.error(f"Error in main loop: {e}")
+            time.sleep(15)
+
 if __name__ == "__main__":
     main()
+
