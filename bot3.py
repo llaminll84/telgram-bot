@@ -316,6 +316,7 @@ def detect_candlestick_patterns(df):
     patterns = []
     open_, close, high, low = df['open'].iloc[-1], df['close'].iloc[-1], df['high'].iloc[-1], df['low'].iloc[-1]
     prev_open, prev_close = df['open'].iloc[-2], df['close'].iloc[-2]
+
     # (ادامه detect_candlestick_patterns)
     if prev_close < prev_open and close > open_ and close > prev_open and open_ < prev_close:
         patterns.append('Bullish Engulfing')
