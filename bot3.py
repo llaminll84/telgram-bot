@@ -36,8 +36,8 @@ LOW_TF_TO_REQUIRE_HIGH_CONFIRM = ['5m', '15m']
 HIGH_TFS = ['1h', '4h']
 
 SIGNALS_PER_CYCLE = 3         # max signals per cycle
-MIN_SCORE = 30.0                # minimum score to send
-MIN_SCORE_HIGH_CONFIRM = 18.0   # lower bar if high-TF confirmed
+MIN_SCORE = 38.0                # minimum score to send
+MIN_SCORE_HIGH_CONFIRM = 22.0   # lower bar if high-TF confirmed
 SEND_DELAY_BETWEEN_MSGS = 1.0
 SIGNAL_INTERVAL = 5 * 60        # seconds cooldown per symbol
 
